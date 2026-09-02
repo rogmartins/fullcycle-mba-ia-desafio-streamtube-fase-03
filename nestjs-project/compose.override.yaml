@@ -1,3 +1,8 @@
+# Override local (carregado automaticamente pelo Docker Compose junto com compose.yaml).
+# Remapeia a porta do PostgreSQL publicada no host de 5432 para 5433, pois a 5432
+# já está em uso por uma instância de PostgreSQL nativa nesta máquina.
+# Isso afeta apenas o acesso externo (ex.: psql rodando no host) — a comunicação
+# entre containers continua em db:5432, sem necessidade de alterar DB_PORT no .env.
 services:
   db:
     ports: !override
