@@ -1,20 +1,21 @@
 # Technical Decisions — Phase 03: Upload e Processamento de Vídeos
 
 > **Phase:** 03 — Upload e Processamento de Vídeos
-> **Status:** Decided (TD-01–TD-12)
+> **Status:** Decided (TD-01–TD-17)
 > **Date:** 2026-09-06
 
 ---
 
 ## Scope of this document
 
-Built in two research rounds:
+Built in four research rounds:
 
 - **Round 1 — Background processing queue** (TD-01 – TD-03, decided): the "Message Queue (TBD)" container in [software-arch.mermaid](../diagrams/software-arch.mermaid), plus where the worker runs and what happens when a job fails.
 - **Round 2 — Large upload path** (TD-04 – TD-07): how a 10GB file reaches the object store without blocking the API, how the draft video record is pre-registered when the upload starts, how the API learns the upload finished, and which S3 client library to use.
 - **Round 3 — Video worker runtime** (TD-08 – TD-12): how the worker process boots, how FFmpeg reaches the container, how it is invoked from Node, how it reads a 10GB source object, and which frame becomes the thumbnail. TD-02 already fixed the *topology* (separate container, shared codebase) and is not reopened here.
+- **Round 4 — Playback and delivery** (TD-13 – TD-17): what goes in the public video URL, who answers the player's Range requests with `206 Partial Content`, how long a playback grant lives, how a direct download differs from playback, and whether the worker normalizes MP4 index placement.
 
-Still **not** covered and pending a separate round: the object storage service itself (self-hosted MinIO vs managed S3 and its bucket/lifecycle layout), unique short URL generation, HTTP Range streaming, and the download endpoint. TD-04 – TD-12 assume only that the store speaks the **S3 API**, which both candidates do.
+Still **not** covered and pending a separate round: the object storage service itself (self-hosted MinIO vs managed S3, and its bucket/lifecycle layout). Every decision in this document assumes only that the store speaks the **S3 API** and — from TD-04 Option A onwards — is reachable from the browser; both candidates satisfy that.
 
 **Constraints inherited from previous phases (not reopened):** `@nestjs/config` with namespaced `registerAs` factories (TD-01.03), Joi env validation (TD-01.02), custom domain exception filter (TD-02.07), class-validator DTOs (TD-02.06), JWT access tokens via custom guards (TD-02.02), PostgreSQL 17 + TypeORM 0.3, NestJS 11 on Node 25 (`node:25.6.0-slim`), Docker Compose with `db` and `mailpit` services.
 
@@ -393,6 +394,168 @@ Always seek to the same offset.
 
 ---
 
+## TD-13: Public Video Identifier (Unique URL)
+
+**Context:** The phase requires *"URL única por vídeo, sem conflito com outros vídeos"*, and the plan's Pontos de Atenção sharpen it to *"uma URL curta e única que nunca conflite com outro vídeo"*. This identifier appears in every watch link and is the lookup key for the playback and download routes below. It also carries a security role: Phase 04 introduces **unlisted** videos, reachable *"somente via link"*, so the identifier is the only thing standing between an unlisted video and someone enumerating URLs. Existing entities use `@PrimaryGeneratedColumn('uuid')` (UUIDv4 via `uuid_generate_v4()`); that stays the internal PK regardless of what goes in the URL. *Feeds TD-14 and TD-16.*
+
+**Options:**
+
+### Option A: Random opaque `public_id` column, separate from the primary key
+A short URL-safe random string — 12 characters of base64url ≈ 72 bits — stored in a `UNIQUE` column on `videos` and generated when the draft row is created (TD-05). Public routes resolve `/videos/:publicId`; the UUID PK stays internal.
+
+- **Pros:** Short, and unguessable enough that enumeration is not a threat, which is precisely what Phase 04's unlisted visibility needs. The `UNIQUE` constraint makes "never conflicts" a database guarantee with a retry on the (astronomically rare) violation — at 72 bits the birthday probability across a million videos is ~1 in 10 billion. Decoupled from the PK, so internal keys can change without breaking published links. Generated from `node:crypto` (`randomBytes(9).toString('base64url')`) — no new dependency.
+- **Cons:** One extra indexed column, and every public lookup resolves through it instead of the PK. Needs an explicit collision-retry path even though it will never fire. The value carries no ordering or meaning, so it is useless for sorting and opaque when debugging.
+
+### Option B: Expose the UUID primary key
+Put the existing UUIDv4 PK straight in the URL: `/videos/9f8e3c1a-....`
+
+- **Pros:** Nothing to add — no column, no generator, no collision handling, uniqueness already guaranteed by the PK. One key for internal and public use. UUIDv4 is random, so unlisted videos are still unenumerable.
+- **Cons:** 36 characters is the opposite of the "URL curta" the plan asks for. Publishes the internal identifier in every link, so the PK is frozen forever by URLs already in the wild. Reveals the entity's identifier surface to clients for no benefit.
+
+### Option C: Sqids/Hashids encoding of a sequential counter
+Add a `bigint` sequence to `videos` and encode it into a short string at read time (`sqids@0.3.0`, `hashids@2.3.0`), decoding on lookup.
+
+- **Pros:** The shortest IDs of any option (4–6 characters early on) and no stored value beyond the sequence. Collision-free by construction, since the encoding is a bijection rather than a draw.
+- **Cons:** It is an encoding, not a secret — Sqids' own FAQ states the IDs are decodable and must not be treated as a security mechanism. Sequential input means a valid ID reveals its neighbours, which defeats Phase 04's unlisted requirement and leaks the platform's total upload count. Adds a dependency plus a decode step on every request, and an alphabet/blocklist configuration to get right.
+
+### Option D: Title slug plus a short suffix
+`/videos/minhas-ferias-2026-x7Kq2p`.
+
+- **Pros:** Human-readable and SEO-friendly; the random suffix keeps identical titles from colliding.
+- **Cons:** TD-05 creates the draft *before* a title exists, so there is nothing to slugify at generation time. Titles are editable in Phase 04, so the slug either rots or freezes and drifts from the displayed title. Requires accent/punctuation normalization, length capping and a reserved-word list. Solves an SEO problem the phase never states.
+
+**Recommendation:** **Option A** — it is the only option that satisfies both halves of the requirement at once: short enough to be a real watch URL, and random enough that Phase 04's unlisted videos are genuinely unreachable without the link, which Option C explicitly cannot promise and Option B pays 36 characters for. Generate it with `node:crypto` rather than a library: `nanoid@6.0.1` is ESM-only and declares `engines: ^22 || ^24 || >=26`, which excludes the Node 25 runtime this project pins, and pulling ESM into the CommonJS Jest setup is avoidable friction for what is one line of stdlib (`nanoid@3.3.18` still ships a CJS entry point if a library is ever preferred). Option D stays available later as an additive `/videos/:slug-:publicId` form that ignores everything but the id, so choosing A now does not close the SEO door.
+
+**Decision:** **Option A**
+
+---
+
+## TD-14: Playback Delivery Path — who answers the Range request
+
+**Context:** The phase requires *"Reprodução via streaming (sem necessidade de download completo)"*. Concretely: the origin serving the video must advertise `Accept-Ranges: bytes` and answer a player's `Range: bytes=…` with **`206 Partial Content`** plus `Content-Range`, so `<video>` starts on the first bytes and seeks without fetching the file. Every option below produces 206s — they differ in *who* emits them. TD-04 already established the principle that 10GB of video never transits the API container; this decision is where that principle is either upheld or abandoned on the read path, which carries far more concurrency than uploads. *Depends on TD-07 and TD-13.*
+
+**Options:**
+
+### Option A: API proxies the bytes, translating Range to S3
+`GET /videos/:publicId/stream` parses the incoming `Range`, issues `GetObjectCommand` with the same `Range` (the SDK maps the input field to the HTTP header), then sets `206`, `Content-Range` and `Accept-Ranges` and returns a `StreamableFile` wrapping the S3 body.
+
+- **Pros:** Single origin — no CORS, no store exposure to the browser, no signature lifetime to manage. Visibility rules (public/unlisted, Phase 04) and view counting are enforced on the very request that serves the bytes. Storage credentials never leave the API.
+- **Cons:** Every concurrent viewer holds an API connection for the length of the video and every byte is paid twice (store → API → client) — the cost TD-04 refused for uploads, now on the busier path. `StreamableFile` handles `type`/`disposition`/`length` but has **no Range support**, so range parsing, `Content-Range` and the `416` case are hand-written. Seeking produces bursts of small ranges, each a fresh S3 round trip. Backpressure and aborted-request cleanup become the API's problem.
+
+### Option B: API issues a presigned GET; the store serves the bytes
+`GET /videos/:publicId/playback` returns the video's metadata plus a presigned URL and its expiry; `<video src>` points at that URL. S3 and MinIO natively advertise `Accept-Ranges: bytes` and answer Range with 206.
+
+- **Pros:** Zero bytes through the API, consistent with TD-04 and TD-11, so the read path scales with the store rather than the Node process. Range semantics are the store's and are already correct for every player. Critically, the signature covers only headers present on the command — the presigner adds just `content-type` to the unsignable set and never signs an absent `Range` — so the player may range-request freely against the same URL. Reuses the TD-07 signer and the browser-facing store endpoint and CORS config that TD-04 Option A already requires.
+- **Cons:** Exposes the store's public endpoint, and the URL is shareable until it expires (hotlinking), bounded but not eliminated by TTL (TD-15). Playback must survive expiry mid-video (TD-15). Because bytes bypass the API, Phase 05's view count becomes an explicit client call instead of a side effect of serving. CORS must expose `Content-Range`/`Accept-Ranges` to the page.
+
+### Option C: Stable API route that 302-redirects to a freshly signed URL
+`GET /videos/:publicId/stream` responds `302` to a URL signed on the spot, so the public link itself never contains a signature.
+
+- **Pros:** A stable, signature-free, shareable URL that can go directly in `<video src>`, with the API re-authorizing on every request and no expiry embedded in what the user copies.
+- **Cons:** Browsers treat **cross-origin redirected range requests from media elements inconsistently** — Chromium restricts responses to ranges whose origin differs from the initial response's origin, and 302-related playback bugs are long-standing in players. The redirect may be re-followed on every seek, adding a round trip and a signing call per range. Two hops to debug, for little gain over Option B.
+
+### Option D: Public-read bucket with permanent object URLs
+Objects are world-readable at a stable URL under a random key; the API just returns it.
+
+- **Pros:** Simplest read path there is, trivially cacheable and CDN-ready, with no signing, expiry or refresh logic anywhere.
+- **Cons:** No revocation — deleting the video row does not stop playback until the object itself is deleted. Unlisted semantics collapse into key obscurity with no time bound. One misconfigured prefix exposes the whole bucket, including in-flight uploads. Any future private or paid content becomes a migration rather than a config change.
+
+**Recommendation:** **Option B (presigned GET, store serves the 206)** — it is the only option that gets correct Range/206 behaviour for free *and* keeps the read path off the API, which matters more here than on upload because every viewer is a concurrent streamer. It also reuses machinery TD-04 and TD-07 already put in place: the same signer, the same browser-reachable store endpoint, the same CORS policy. Option A remains the honest fallback if the store cannot be exposed to browsers in the target deployment — the API contract is unchanged, only the response body differs — but it should be adopted knowingly, since it puts every watched byte back through Node.
+
+**Decision:** **Option B**
+
+---
+
+## TD-15: Playback URL Lifetime and Refresh
+
+**Context:** With TD-14 Option B, the playback grant is a signature with an expiry (SigV4 allows up to 7 days from an SDK; the S3 console caps its own at 12 hours). The player reuses the *same* URL for every range request, so a viewer who pauses a two-hour video and then seeks hits a `403` mid-playback rather than a clean error. This decision sets how long the grant lives and who refreshes it. *Depends on TD-14.*
+
+**Options:**
+
+### Option A: Short TTL (~15 min) with player-side refresh on failure
+The signer uses a small expiry; the frontend detects the failed range request, fetches a new URL and swaps `src`.
+
+- **Pros:** Narrow sharing window — a leaked URL dies within minutes, which is the strongest posture of the three against hotlinking.
+- **Cons:** Any pause or seek past the TTL breaks playback unless the frontend handles it, and doing that well means restoring the current time and re-buffering after a `src` swap. Real client complexity for a link that is still shareable within its window.
+
+### Option B: TTL sized to exceed a viewing session (6–12h), issued per page load
+One presigned URL per watch-page load, valid well past the longest plausible session.
+
+- **Pros:** Playback simply never expires in practice — pausing, seeking and resuming all behave, with no refresh logic in the player. The API still gates *issuance*, so an unpublished, deleted or newly-restricted video stops handing out URLs immediately.
+- **Cons:** A copied URL works for hours for anyone who has it. Revocation inside that window requires deleting or renaming the object, not just a DB change.
+
+### Option C: Long TTL plus a proactive refresh endpoint
+Option B's lifetime, with the frontend re-requesting the URL shortly before it expires rather than reacting to a failure.
+
+- **Pros:** Smooth playback like B while keeping the window bounded, and refresh happens on a timer instead of in an error path.
+- **Cons:** More moving parts on both sides for a marginal gain, given the content is publicly watchable by design.
+
+**Recommendation:** **Option B** — the platform's premise is *"Acesso anônimo: qualquer pessoa pode assistir vídeos sem cadastro"*, so the presigned URL is not guarding a secret; its job is to keep the bucket from being open and to keep issuance under API control, and unlisted visibility (Phase 04) is enforced at issuance time by refusing to sign for a video the requester should not reach. Sizing the TTL above the longest plausible session removes an entire class of mid-playback failures that Option A trades real client complexity to create. Return the expiry alongside the URL so the frontend can adopt Option C later without an API change.
+
+**Decision:** **Option B**
+
+---
+
+## TD-16: Direct Download Route
+
+**Context:** The phase requires *"Download do vídeo pelo usuário"*, surfaced in Phase 05 as a download button. It differs from playback in exactly one respect: the response must arrive as a file save under a sensible name — `Content-Disposition: attachment; filename="…"` — instead of rendering inline. The storage key is opaque (TD-05), so the user-facing filename has to be supplied at request time. *Depends on TD-13 and TD-14.*
+
+**Options:**
+
+### Option A: Presigned GET with the `ResponseContentDisposition` override
+`GET /videos/:publicId/download` signs a `GetObjectCommand` carrying `ResponseContentDisposition: 'attachment; filename="…"'`, which the SDK serializes as the `response-content-disposition` query parameter covered by the signature. S3 and MinIO both honour the response-header override parameters.
+
+- **Pros:** Same path, client and cost profile as TD-14 Option B — a 10GB download never touches the API. Resumable for free, since the store answers Range on the download URL too. The filename is derived by the API from the video title, independent of the storage key. Implementation is the playback signer plus one parameter.
+- **Cons:** A second endpoint and a second signature to reason about. Non-ASCII filenames need RFC 5987 encoding and have a history of producing `SignatureDoesNotMatch` on MinIO when quoting or spacing differs, so the name must be conservatively sanitized. Inherits TD-15's lifetime question, though a download URL can safely use a much shorter TTL.
+
+### Option B: API-proxied download with `StreamableFile`
+The API pipes the S3 body through, using `StreamableFile`'s documented `disposition` and `type` options.
+
+- **Pros:** One origin, no signature, no CORS, and complete control over headers, authorization and any download counting. The disposition is exactly what `StreamableFile` is designed to set.
+- **Cons:** Pushes a full 10GB per download through the API — worse than the playback case, because a download reads the object end to end by definition. Resumption must be hand-built (Range → S3 Range → 206) or an interrupted download restarts from zero. Concurrent downloads consume API sockets and bandwidth linearly.
+
+### Option C: Reuse the playback URL with the HTML `download` attribute
+The frontend renders `<a href={playbackUrl} download>`.
+
+- **Pros:** No new endpoint or signer at all.
+- **Cons:** The `download` attribute is **ignored for cross-origin URLs** — the browser navigates to the store and plays the video inline instead of saving it, which is exactly the situation TD-14 Option B creates. Even where it worked, the saved file would be named after the opaque storage key.
+
+**Recommendation:** **Option A** — it is TD-14's signer with one added parameter, it keeps a 10GB transfer entirely off the API on the one route guaranteed to move the whole file, and it is the only option that can name the downloaded file after the video's title. Sanitize the filename to ASCII and keep the download TTL short, since a download URL is consumed immediately rather than held open for a session. Option B is the fallback if the store's response-header override behaves inconsistently in the chosen deployment; Option C does not work cross-origin and is not carried forward.
+
+**Decision:** **Option A**
+
+---
+
+## TD-17: MP4 Index (`moov`) Placement Normalization
+
+**Context:** Progressive playback needs the MP4 index (`moov` atom) before decoding can start, and many encoders and recorders write it at the *end* of the file. Against a Range-capable origin (TD-14) the player recovers by range-requesting the tail first, at the cost of extra round trips before the first frame; against a non-Range origin it would fail outright. The worker from TD-08–TD-12 is the only component that could normalize this, and TD-11 deliberately chose never to read the whole object. This decides whether Phase 03 pays to guarantee fast starts. *Depends on TD-10, TD-11 and TD-14.*
+
+**Options:**
+
+### Option A: No normalization — rely on Range plus the player's tail read
+Store the uploaded file as-is and let the player fetch the index wherever it sits.
+
+- **Pros:** Costs nothing and preserves TD-11's sparse-read property — the worker still never pulls 10GB. Already optimal for the many sources that are written faststart for the web. The extra tail fetch is one additional range request against a store that serves ranges natively.
+- **Cons:** A moov-at-end file pays one or two extra round trips before playback begins, and a large index makes that pre-roll fetch megabytes rather than kilobytes. Startup latency then varies by source file in a way nothing surfaces until users complain.
+
+### Option B: Conditional remux when the index is at the end
+The probe step detects moov placement; only then does the worker run `ffmpeg -i <src> -c copy -movflags +faststart <dst>` and replace the object.
+
+- **Pros:** Guarantees a fast start for every video while paying only for the files that need it. It is a stream copy, not a re-encode, so quality and duration are untouched.
+- **Cons:** A copy still reads and writes the **entire** object — 10GB down, 10GB up, plus temp disk — which is exactly the cost TD-11 Option B was chosen to avoid, and it stretches job duration and TD-03's retry cost by minutes. Replacing an object that a viewer may already be streaming needs care. Detection is cheap; the remediation is not.
+
+### Option C: Always remux on ingest
+Every upload is rewritten with `+faststart` regardless of its original layout.
+
+- **Pros:** One uniform code path with predictable output, and a natural hook for future container normalization.
+- **Cons:** Pays Option B's full cost on every upload, including the majority that already start fast. Doubles storage traffic per video for no gain in the common case.
+
+**Recommendation:** **Option A for Phase 03** — the stated requirement is that playback begins without a full download, and Range plus a tail read already delivers that; Option B's cure contradicts TD-11's entire premise by pulling 10GB through the worker for a benefit measured in a few hundred milliseconds of startup. Record the moov placement as metadata during the probe the worker already runs, so the question can be reopened against real data rather than assumption — and if slow starts do turn out to be common, Option B is a self-contained addition to the existing job, not a redesign.
+
+**Decision:** **Option A**
+
+---
+
 ## Decisions Summary
 
 | ID | Decision | Recommendation | Choice |
@@ -409,6 +572,11 @@ Always seek to the same offset.
 | TD-10 | FFmpeg/ffprobe Invocation from Node | A — `spawn` + thin injectable service | **Option A** |
 | TD-11 | Source File Access for Processing | B — Presigned URL as FFmpeg input | **Option B** |
 | TD-12 | Thumbnail Frame Selection Policy | A — Percentage-based offset | **Option A** |
+| TD-13 | Public Video Identifier (Unique URL) | A — Random `public_id` column via `node:crypto` | **Option A** |
+| TD-14 | Playback Delivery Path | B — Presigned GET; store answers Range with 206 | **Option B** |
+| TD-15 | Playback URL Lifetime and Refresh | B — Session-sized TTL (6–12h) per page load | **Option B** |
+| TD-16 | Direct Download Route | A — Presigned GET with `ResponseContentDisposition` | **Option A** |
+| TD-17 | MP4 `moov` Placement Normalization | A — No normalization; rely on Range + tail read | **Option A** |
 
 ---
 
@@ -428,7 +596,7 @@ These constrain TD-04 regardless of which store is chosen, since MinIO implement
 
 ## Infrastructure Impact
 
-Reflects the decided TD-01 – TD-03 plus the recommended TD-04 – TD-07 (revise if those decisions change).
+Reflects the decided TD-01 – TD-12 plus the recommended TD-13 – TD-17 (revise if the pending decisions change).
 
 | Item | Change |
 |------|--------|
@@ -441,6 +609,10 @@ Reflects the decided TD-01 – TD-03 plus the recommended TD-04 – TD-07 (revis
 | Dependencies | `@nestjs/bullmq@^12`, `bullmq@^5`/`^6`, `ioredis`, `@aws-sdk/client-s3@^3`, `@aws-sdk/s3-request-presigner@^3` — **no FFmpeg npm wrapper** (TD-10 A) |
 | Worker Dockerfile | Separate stage/target on `node:25.6.0-slim` with `apt-get install -y ffmpeg` (TD-09 A); entrypoint `main.worker.ts` (TD-08 A) |
 | Worker health check | Compose `CMD`-form probe — the standalone context exposes no HTTP port (TD-08 A) |
+| Database | `public_id` on `videos`: `varchar(12)`, `NOT NULL`, `UNIQUE`, indexed — the lookup key for every public route (TD-13 A) |
+| Storage CORS | Must also allow `GET` with the `Range` header from the frontend origin and list `Content-Range`, `Accept-Ranges` and `Content-Length` in `Access-Control-Expose-Headers`, or the player cannot read the 206 metadata (TD-14 B) |
+| `.env.example` | Playback presign TTL (6–12h) and a shorter download presign TTL (TD-15 B, TD-16 A) |
+| Dependencies | Round 4 adds none — `node:crypto` covers TD-13, and TD-14/TD-16 reuse the TD-07 signer |
 
 > Docker networking rule applies: the queue and storage hosts are Compose service names (`redis`, the store's service name), never `localhost`. Note the one exception this creates — the **browser** needs a separately configured, externally reachable storage endpoint for TD-04 Option A, distinct from the in-network host the API uses to sign.
 
@@ -480,3 +652,17 @@ Verified 2026-09-06 against the versions currently published.
 - [fluent-ffmpeg on npm](https://www.npmjs.com/package/fluent-ffmpeg) and [its repository](https://github.com/fluent-ffmpeg/node-fluent-ffmpeg) — deprecated; archived read-only 2025-05-22
 - npm registry — `fluent-ffmpeg@2.1.3` (deprecated), `@ts-ffmpeg/fluent-ffmpeg@2.2.6`, `ffmpeg-static@5.3.0` (ffmpeg 6.1.1, **no `bin`, no ffprobe**), `@ffprobe-installer/ffprobe@2.1.2` (2023), `ffprobe-static@3.1.0` (2022)
 - Verified directly in `node:25.6.0-slim` — Debian 12 bookworm, `apt-cache policy ffmpeg` → `7:5.1.9-0+deb12u1` from `bookworm/main` and `bookworm-security`
+
+**Round 4 — playback and delivery**
+
+- [Amazon S3 — Download and upload objects with presigned URLs](https://docs.aws.amazon.com/AmazonS3/latest/userguide/using-presigned-url.html) — SDK expiry up to 7 days (console caps at 12h); response-header override parameters
+- [`@aws-sdk/client-s3` `GetObjectCommand`](https://github.com/aws/aws-sdk-js-v3/tree/main/clients/client-s3) via Context7 — `Range` input serialized to the HTTP `Range` header; range response returns `ContentRange` + `AcceptRanges`; `ResponseContentDisposition` serialized as the `response-content-disposition` query parameter
+- [`@aws-sdk/s3-request-presigner` presigner source](https://github.com/aws/aws-sdk-js-v3/blob/main/packages/s3-request-presigner/src/presigner.ts) via Context7 — only `content-type` is added to `unsignableHeaders`, so an **absent** `Range` is never signed and the player may range-request the presigned URL freely
+- [NestJS — Streaming files](https://docs.nestjs.com/techniques/streaming-files) via Context7 — `StreamableFile` options `type` / `disposition` / `length`; **no Range or 206 handling**
+- [MinIO — presigned GET response header overrides](https://github.com/minio/minio-go/blob/master/examples/s3/presignedgetobject.go) — `response-content-disposition` via `reqParams`; [minio-js #820](https://github.com/minio/minio-js/issues/820) — RFC 5987 filenames producing `SignatureDoesNotMatch`
+- [Chromium issue 41190208](https://issues.chromium.org/issues/41190208) and player reports ([video.js #3408](https://github.com/videojs/video.js/issues/3408), [http-streaming #888](https://github.com/videojs/http-streaming/issues/888)) — media-element behaviour with redirected and cross-origin range requests
+- [FFmpeg — `-movflags +faststart`](https://ffmpeg.org/ffmpeg-formats.html#toc-Options-11) — moves the `moov` atom to the front; a second full pass over the file, `-c copy` needs no re-encode
+- [Sqids FAQ](https://sqids.org/faq) — IDs are decodable and explicitly not a security mechanism
+- [Node.js — `require(esm)` marked stable in v25.4.0](https://nodejs.org/en/blog/release/v22.12.0) and [Joyee Cheung, *require(esm) from experiment to stability*](https://joyeecheung.github.io/blog/2025/12/30/require-esm-in-node-js-from-experiment-to-stability/)
+- npm registry — `nanoid@6.0.1` (ESM-only, `engines: ^22 || ^24 || >=26` — excludes Node 25), `nanoid@3.3.18` (CJS entry via `exports.require`), `sqids@0.3.0`, `hashids@2.3.0`
+- [PostgreSQL 18 release notes](https://www.postgresql.org/docs/current/release-18.html) — native `uuidv7()`; unavailable on the PostgreSQL 17 this project pins, which is why the UUIDv4 PK is left untouched by TD-13
