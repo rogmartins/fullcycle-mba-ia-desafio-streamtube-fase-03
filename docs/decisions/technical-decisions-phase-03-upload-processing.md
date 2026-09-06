@@ -1,7 +1,7 @@
 # Technical Decisions — Phase 03: Upload e Processamento de Vídeos
 
 > **Phase:** 03 — Upload e Processamento de Vídeos
-> **Status:** Decided (TD-01–TD-07)
+> **Status:** Decided (TD-01–TD-12)
 > **Date:** 2026-09-06
 
 ---
@@ -12,8 +12,9 @@ Built in two research rounds:
 
 - **Round 1 — Background processing queue** (TD-01 – TD-03, decided): the "Message Queue (TBD)" container in [software-arch.mermaid](../diagrams/software-arch.mermaid), plus where the worker runs and what happens when a job fails.
 - **Round 2 — Large upload path** (TD-04 – TD-07): how a 10GB file reaches the object store without blocking the API, how the draft video record is pre-registered when the upload starts, how the API learns the upload finished, and which S3 client library to use.
+- **Round 3 — Video worker runtime** (TD-08 – TD-12): how the worker process boots, how FFmpeg reaches the container, how it is invoked from Node, how it reads a 10GB source object, and which frame becomes the thumbnail. TD-02 already fixed the *topology* (separate container, shared codebase) and is not reopened here.
 
-Still **not** covered and pending a separate round: the object storage service itself (self-hosted MinIO vs managed S3 and its bucket/lifecycle layout), the FFmpeg wrapper, unique short URL generation, HTTP Range streaming, and the download endpoint. TD-04 – TD-07 assume only that the store speaks the **S3 API**, which both candidates do.
+Still **not** covered and pending a separate round: the object storage service itself (self-hosted MinIO vs managed S3 and its bucket/lifecycle layout), unique short URL generation, HTTP Range streaming, and the download endpoint. TD-04 – TD-12 assume only that the store speaks the **S3 API**, which both candidates do.
 
 **Constraints inherited from previous phases (not reopened):** `@nestjs/config` with namespaced `registerAs` factories (TD-01.03), Joi env validation (TD-01.02), custom domain exception filter (TD-02.07), class-validator DTOs (TD-02.06), JWT access tokens via custom guards (TD-02.02), PostgreSQL 17 + TypeORM 0.3, NestJS 11 on Node 25 (`node:25.6.0-slim`), Docker Compose with `db` and `mailpit` services.
 
@@ -242,6 +243,156 @@ Official MinIO client (`8.0.7`), a single package with a simpler API (`presigned
 
 ---
 
+## TD-08: Worker Process Bootstrap Mode
+
+**Context:** TD-02 placed the video worker in its own container sharing the API codebase, and TD-01 chose BullMQ, whose workers are registered by `@nestjs/bullmq` during module initialization. What remains open is *how* that container's Node process boots: a NestJS process can start as a full HTTP application, as a standalone IoC context with no listeners, or as a Nest microservice bound to a transport. This also determines how the container answers a Docker health check. *Depends on TD-01 and TD-02.*
+
+**Options:**
+
+### Option A: Standalone context — `NestFactory.createApplicationContext()`
+A `main.worker.ts` entrypoint instantiates the IoC container without any network listener, importing only the modules the worker needs. BullMQ workers start on module init and `app.close()` drives the shutdown hooks that drain in-flight jobs.
+
+- **Pros:** Smallest surface — no HTTP server, port, or exposed routes on a container that serves no requests. The documented NestJS pattern for CRON jobs, CLI tools, and non-web contexts. DI, config namespaces, and TypeORM repositories all work normally.
+- **Cons:** No HTTP means no `/health` endpoint — the Compose health check must be a `CMD`-based probe (a small script asserting the process and Redis connection) rather than an HTTP probe. NestJS states that HTTP-related features — middleware, interceptors, pipes, guards — are unavailable in this context, so any code assuming them must not be imported.
+
+### Option B: Full HTTP application serving only operational routes
+`NestFactory.create()` boots a normal HTTP app that registers the processors and exposes health/readiness (and later metrics), while serving none of the business controllers.
+
+- **Pros:** Standard HTTP health and readiness probes work with any orchestrator. A natural home for queue metrics and a future Bull Board dashboard. Identical bootstrap shape to the API, so one mental model for both containers.
+- **Cons:** Runs a web server on a container that exists to consume a queue — a port, and a surface, that must be secured and kept internal. Care needed to ensure business controllers are not transitively imported and accidentally exposed. More startup weight for functionality the phase does not require.
+
+### Option C: Nest microservice — `NestFactory.createMicroservice()`
+The worker boots as a Nest microservice bound to a transport, consuming messages through `@MessagePattern` handlers.
+
+- **Pros:** First-class NestJS abstraction for non-HTTP consumers, with its own lifecycle and exception layer.
+- **Cons:** Conflicts with TD-01 — Nest's transports do not include BullMQ, so the microservice layer would sit alongside the BullMQ worker doing nothing, or force replacing BullMQ with a transport that lacks its retry/backoff/progress semantics. Adds `@nestjs/microservices` and a second messaging concept for no gain.
+
+**Recommendation:** **Option A (standalone context)** — It is the pattern NestJS documents for exactly this case, and it keeps a queue consumer from running a web server it has no use for. The one real cost is the health probe, and Docker Compose's `CMD`-form health check covers that without HTTP. Option C is effectively excluded by TD-01. If operational HTTP endpoints (metrics, Bull Board) are wanted later, moving to Option B changes only the bootstrap file — the modules and processors are untouched.
+
+**Decision:** **Option A**
+
+---
+
+## TD-09: FFmpeg Binary Provisioning
+
+**Context:** The phase requires extracting duration and metadata and generating a thumbnail — the first needs **ffprobe**, the second **ffmpeg**. Neither ships with Node, so the worker image (TD-02) must provide both. The base image is `node:25.6.0-slim`, which is **Debian 12 (bookworm)**. *Depends on TD-02.*
+
+**Options:**
+
+### Option A: Distro package via `apt-get install ffmpeg`
+One `RUN` line in the worker Dockerfile. Debian bookworm currently offers `7:5.1.9-0+deb12u1`, and the package provides **both** `ffmpeg` and `ffprobe`.
+
+- **Pros:** Both binaries from one command, on the `PATH`, no npm postinstall download. Security patches come from Debian's stream (`bookworm-security`), which matters for a tool parsing untrusted user-uploaded media. Same mechanism already used in `Dockerfile.dev` for `procps`/`curl`. Nothing to vendor or pin beyond the base image.
+- **Cons:** FFmpeg 5.1, older than the latest release. The exact version is tied to the Debian release, so a base-image bump can move it. Adds build-time apt layers and image size.
+
+### Option B: npm packages — `ffmpeg-static` (+ a separate ffprobe package)
+`ffmpeg-static@5.3.0` downloads a prebuilt FFmpeg binary on install (currently 6.1.1) and exports its path.
+
+- **Pros:** Version travels with `package.json`/lockfile, so builds are reproducible and independent of the base image. Newer FFmpeg than bookworm. No apt layer.
+- **Cons:** **Ships `ffmpeg` only — there is no `ffprobe`** (verified: the package declares no `bin` and exports a single path), so metadata extraction needs a second package, and the candidates are stale: `@ffprobe-installer/ffprobe` last published 2023, `ffprobe-static` 2022. Security patches depend on the packager re-releasing, not on a distro stream. A postinstall network download inside a Docker build is a fragile, cache-unfriendly step.
+
+### Option C: Multi-stage copy from a dedicated FFmpeg image
+Pin an upstream FFmpeg image and `COPY --from=` the binaries into the worker image.
+
+- **Pros:** Exact, reproducible, arbitrarily recent FFmpeg, decoupled from both the Debian release and npm. Common practice for media workloads.
+- **Cons:** More Dockerfile machinery and a second image to track and update. Shared-library compatibility must be verified against the slim base (or a static build used). Overhead beyond what probing and single-frame extraction need.
+
+**Recommendation:** **Option A (`apt-get install ffmpeg`)** — The deciding fact is that this phase needs *ffprobe as much as ffmpeg*, and Option A is the only one that delivers both from a single maintained source; Option B's headline appeal collapses once a stale, separately-maintained ffprobe package has to be bolted on. FFmpeg 5.1 is amply sufficient for reading container metadata and extracting one frame, and having a distro security stream behind a binary that parses untrusted uploads is worth more here than being two minor versions newer.
+
+**Decision:** **Option A**
+
+---
+
+## TD-10: FFmpeg/ffprobe Invocation from Node
+
+**Context:** The worker needs two invocations: ffprobe emitting machine-readable metadata (`-of json` with `-show_format` / `-show_streams`, whose output is explicitly "designed to be easily parsable"), and ffmpeg extracting a single frame. This decision picks the Node-side interface. *Depends on TD-09.*
+
+**Options:**
+
+### Option A: `child_process.spawn` wrapped in a small injectable service
+A thin NestJS service builds the argument array, spawns the binary, collects stdout/stderr, and resolves or rejects on exit code — wrapped so tests can substitute a fake.
+
+- **Pros:** No dependency to inherit or outlive. Full control of arguments, timeouts, cancellation (`kill` on job abort), and stderr streaming for progress reporting into BullMQ. Argument arrays avoid shell interpolation on user-controlled values. The wrapper is small: this phase makes two distinct calls.
+- **Cons:** Argument construction is hand-written, so FFmpeg flag semantics must be understood rather than abstracted. No built-in helpers for progress parsing or format discovery. Slightly more code than a fluent builder.
+
+### Option B: `fluent-ffmpeg`
+The long-standing fluent wrapper (`ffmpeg().input(...).screenshots(...)`) with `ffprobe()` helpers.
+
+- **Pros:** Expressive chainable API, `screenshots()` covers thumbnail generation in a few lines, and `@types/fluent-ffmpeg` is current (2.1.28, Oct 2025). Enormous body of examples.
+- **Cons:** **Deprecated and archived.** npm marks `fluent-ffmpeg@2.1.3` "Package no longer supported"; the repository was archived read-only on 2025-05-22 and accepts no issues or PRs. No bug fixes and **no security patches** for a component processing untrusted user media, and the maintainers note it no longer works properly with recent FFmpeg versions. The alternatives it pointed to are also archived.
+
+### Option C: `@ts-ffmpeg/fluent-ffmpeg` (maintained fork)
+A TypeScript fork of fluent-ffmpeg (`2.2.6`, Aug 2025) carrying the same API with bundled types.
+
+- **Pros:** Keeps fluent-ffmpeg's ergonomics and existing examples while being actively published. Native TypeScript types, no `@types` companion needed.
+- **Cons:** Community fork with a small maintainer base and low adoption — the same single-point-of-failure risk that just materialized upstream, minus the ecosystem that softened it. Inherits the original's architecture and accumulated behaviors. Little independent documentation.
+
+**Recommendation:** **Option A (`spawn` + thin service)** — Option B is disqualified on its own terms: an archived, security-patch-free dependency sitting directly in the path of untrusted user uploads is not an acceptable trade for syntactic convenience, and Option C asks the project to bet on one volunteer fork of the package that just died. The wrapper being replaced is genuinely small here — two invocations — and writing it directly buys precise control over timeouts and cancellation, which the long-running jobs of TD-03 need anyway.
+
+**Decision:** **Option A**
+
+---
+
+## TD-11: Source File Access for Processing
+
+**Context:** The source object can be 10GB and lives in the object store, not on the worker's disk. How FFmpeg reads it decides the worker's disk footprint, how long a job takes to start, and how much data crosses the network per job. FFmpeg's `http`/`https` protocol supports seeking through HTTP Range requests, with `seekable`, `reconnect`, and `multiple_requests` controlling the behavior. *Depends on TD-04 and TD-07.*
+
+**Options:**
+
+### Option A: Download the whole object to local disk, then process
+The worker `GET`s the object to a temp file, runs ffprobe and ffmpeg against it, then deletes it.
+
+- **Pros:** Simplest and most predictable — local file I/O, fully seekable, no dependency on network behavior mid-encode. Trivially debuggable; the file can be inspected on failure. Immune to presigned URL expiry during a long job.
+- **Cons:** Requires up to 10GB of ephemeral disk **per concurrent job**, forcing volume sizing and cleanup-on-crash handling. Transfers the entire object even though probing plus one frame needs a tiny fraction of it. The full download completes before any work starts, inflating job duration and retry cost under TD-03.
+
+### Option B: FFmpeg reads a presigned HTTPS URL directly
+The worker generates a short-lived presigned `GET` (TD-07's signer) and passes the URL as the FFmpeg/ffprobe input; the HTTP protocol issues Range requests to seek.
+
+- **Pros:** Fetches only the byte ranges actually needed — the container header, plus the neighborhood of the target frame — instead of 10GB. Near-zero worker disk usage, so concurrency is bounded by CPU rather than storage. Jobs start immediately. `reconnect` options make transient network faults recoverable inside FFmpeg, below TD-03's retry layer.
+- **Cons:** Reading is coupled to store reachability and to the presigned URL outliving the job. An MP4 whose `moov` atom sits at the end forces a tail read before decoding — still megabytes, not gigabytes, but it makes cost format-dependent. Harder to reason about and to reproduce locally than a plain file.
+
+### Option C: Stream the object into FFmpeg's stdin
+The worker pipes the S3 response body straight into the process.
+
+- **Pros:** No temp file and no presigned URL — the worker's existing S3 client does the reading.
+- **Cons:** A pipe is **not seekable**, so `-ss` cannot jump to a timestamp and FFmpeg must decode forward from the start — the entire 10GB streams through for one frame, the worst outcome of the three. Formats needing a trailing atom may fail outright. No resumption after a mid-stream failure.
+
+**Recommendation:** **Option B (presigned URL as FFmpeg input)** — Probing metadata and grabbing one frame are inherently sparse reads, and Option B is the only option that makes the transfer proportional to that instead of to file size; on a 10GB source it is the difference between megabytes and the whole object, and it removes per-job disk sizing entirely. Option C is excluded by seekability. Option A remains the honest fallback if presigned-URL lifetime or store reachability from the worker turns out to be awkward in deployment — and because both feed FFmpeg an input string, the switch is one line in the worker.
+
+**Decision:** **Option B**
+
+---
+
+## TD-12: Thumbnail Frame Selection Policy
+
+**Context:** The phase requires *"Geração automática de thumbnail a partir de um frame do vídeo"* without saying which frame. A poor rule produces black or slate frames on a large share of uploads. The video's duration is already known from the ffprobe step, so it can inform the choice. Phase 04 later lets users override with a custom thumbnail, so this is the default, not the final word. *Depends on TD-10 and TD-11.*
+
+**Options:**
+
+### Option A: Percentage-based offset (e.g. 10% of duration)
+Seek to a fraction of the duration reported by ffprobe and extract one frame.
+
+- **Pros:** Scales across the whole catalogue — it clears intros on a two-hour video and still lands mid-content on a 30-second clip, which a fixed timestamp cannot do. Uses duration the worker already has. Input seeking makes it a single jump, so under TD-11 Option B it costs roughly one Range request. Deterministic and trivially testable.
+- **Cons:** No content awareness — it can still land on a fade, a transition, or a dark frame. A single sample means no fallback when that happens.
+
+### Option B: FFmpeg `thumbnail` filter over a window
+The `thumbnail` filter analyses a batch of frames and outputs the most representative one, avoiding the blandest candidates.
+
+- **Pros:** Content-aware, so it dodges black frames and transitions that Options A and C hit by chance. Produces visibly better covers on average. Built into FFmpeg — no extra dependency.
+- **Cons:** Must decode a window of frames rather than one, costing CPU and, under TD-11 Option B, a larger contiguous read. Selection is a heuristic, so results are less predictable and harder to assert in tests. Cost scales with the window size chosen.
+
+### Option C: Fixed absolute timestamp (e.g. 3 seconds)
+Always seek to the same offset.
+
+- **Pros:** Simplest possible rule; needs no duration lookup and behaves identically for every file.
+- **Cons:** Systematically wrong at the extremes — it lands in the intro or on a title card for long videos, and past the end for clips shorter than the offset, which needs its own fallback. Ignores information the worker already has.
+
+**Recommendation:** **Option A (percentage-based offset)** — It is the only option that adapts to a catalogue holding both short clips and long videos while costing a single seek, and it reuses the duration the metadata step already produced. Option B yields better frames and is the natural upgrade once real uploads show how often A lands on a bad frame; because both are the same single ffmpeg invocation with different arguments, that change carries no structural cost. Output format and dimensions are left to `plan-phase`, which should also decide whether a failed thumbnail is fatal to the job or leaves the video `ready` with a placeholder.
+
+**Decision:** **Option A**
+
+---
+
 ## Decisions Summary
 
 | ID | Decision | Recommendation | Choice |
@@ -253,6 +404,11 @@ Official MinIO client (`8.0.7`), a single package with a simpler API (`presigned
 | TD-05 | Draft Pre-Registration and Upload State | A — Draft row on `videos`, upload state as columns | **Option A** |
 | TD-06 | Upload Completion Trigger | C — Client-driven completion + reconciliation sweep | **Option C** |
 | TD-07 | S3 Client Library | A — AWS SDK v3 + `s3-request-presigner` | **Option A** |
+| TD-08 | Worker Process Bootstrap Mode | A — Standalone `createApplicationContext()` | **Option A** |
+| TD-09 | FFmpeg Binary Provisioning | A — `apt-get install ffmpeg` in the worker image | **Option A** |
+| TD-10 | FFmpeg/ffprobe Invocation from Node | A — `spawn` + thin injectable service | **Option A** |
+| TD-11 | Source File Access for Processing | B — Presigned URL as FFmpeg input | **Option B** |
+| TD-12 | Thumbnail Frame Selection Policy | A — Percentage-based offset | **Option A** |
 
 ---
 
@@ -282,7 +438,9 @@ Reflects the decided TD-01 – TD-03 plus the recommended TD-04 – TD-07 (revis
 | `src/config/env.validation.ts` | Extend Joi schema with the new variables |
 | Storage service | CORS allowing the frontend origin for browser `PUT`s (TD-04 A); lifecycle rule to abort incomplete multipart uploads |
 | Database | `videos` table with status enum, `storageKey`, `uploadId` (TD-05 A) |
-| Dependencies | `@nestjs/bullmq@^12`, `bullmq@^5`/`^6`, `ioredis`, `@aws-sdk/client-s3@^3`, `@aws-sdk/s3-request-presigner@^3` |
+| Dependencies | `@nestjs/bullmq@^12`, `bullmq@^5`/`^6`, `ioredis`, `@aws-sdk/client-s3@^3`, `@aws-sdk/s3-request-presigner@^3` — **no FFmpeg npm wrapper** (TD-10 A) |
+| Worker Dockerfile | Separate stage/target on `node:25.6.0-slim` with `apt-get install -y ffmpeg` (TD-09 A); entrypoint `main.worker.ts` (TD-08 A) |
+| Worker health check | Compose `CMD`-form probe — the standalone context exposes no HTTP port (TD-08 A) |
 
 > Docker networking rule applies: the queue and storage hosts are Compose service names (`redis`, the store's service name), never `localhost`. Note the one exception this creates — the **browser** needs a separately configured, externally reachable storage endpoint for TD-04 Option A, distinct from the in-network host the API uses to sign.
 
@@ -312,3 +470,13 @@ Verified 2026-09-06 against the versions currently published.
 - [MinIO — Bucket notifications](https://docs.min.io/community/minio-object-store/administration/monitoring/bucket-notifications.html) — webhook target, `s3:ObjectCreated:CompleteMultipartUpload`, `MINIO_API_SYNC_EVENTS`
 - [MinIO — CORS configuration](https://docs.min.io/aistor/administration/cors-configuration/) — `MINIO_API_CORS_ALLOW_ORIGIN`, per-bucket `mc cors set`
 - npm registry — `@aws-sdk/client-s3@3.1127.0`, `minio@8.0.7`, `@tus/server@2.4.5`, `@tus/s3-store@2.0.6`, `tus-js-client@4.3.1`, `@uppy/aws-s3@6.0.0`
+
+**Round 3 — worker runtime**
+
+- [NestJS — Standalone applications](https://docs.nestjs.com/standalone-applications) — `createApplicationContext`, and the stated unavailability of middleware/interceptors/pipes/guards
+- [FFmpeg — Protocols](https://ffmpeg.org/ffmpeg-protocols.html) — `http`/`https` seeking via Range, `seekable`, `reconnect`, `multiple_requests`, `request_size`
+- [ffprobe documentation](https://ffmpeg.org/ffprobe.html) — `-of json`, `-show_format`, `-show_streams`, output "designed to be easily parsable"
+- [FFmpeg — Filters](https://ffmpeg.org/ffmpeg-filters.html#thumbnail) — `thumbnail` filter and its `n`/`log` parameters
+- [fluent-ffmpeg on npm](https://www.npmjs.com/package/fluent-ffmpeg) and [its repository](https://github.com/fluent-ffmpeg/node-fluent-ffmpeg) — deprecated; archived read-only 2025-05-22
+- npm registry — `fluent-ffmpeg@2.1.3` (deprecated), `@ts-ffmpeg/fluent-ffmpeg@2.2.6`, `ffmpeg-static@5.3.0` (ffmpeg 6.1.1, **no `bin`, no ffprobe**), `@ffprobe-installer/ffprobe@2.1.2` (2023), `ffprobe-static@3.1.0` (2022)
+- Verified directly in `node:25.6.0-slim` — Debian 12 bookworm, `apt-cache policy ffmpeg` → `7:5.1.9-0+deb12u1` from `bookworm/main` and `bookworm-security`
