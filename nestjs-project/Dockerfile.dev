@@ -1,6 +1,9 @@
 FROM node:25.6.0-slim
 
-RUN apt update && apt install -y procps curl
+# ffmpeg is installed here for local development only. Production images (Phase 07)
+# keep FFmpeg in the dedicated worker target — the API image never ships it.
+RUN apt update && apt install -y --no-install-recommends procps curl ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /home/node/app
 

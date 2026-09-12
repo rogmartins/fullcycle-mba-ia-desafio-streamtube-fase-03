@@ -48,3 +48,59 @@ export class TokenReuseDetectedException extends DomainException {
     );
   }
 }
+
+export class VideoNotFoundException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_FOUND', 404, 'Video not found');
+  }
+}
+
+export class VideoNotOwnedException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_OWNED', 403, 'You do not own this video');
+  }
+}
+
+export class VideoInvalidStateException extends DomainException {
+  constructor(
+    public readonly current: string,
+    public readonly expected: string[],
+    message = 'Video is not in a valid state for this operation',
+  ) {
+    super('VIDEO_INVALID_STATE', 409, message);
+  }
+}
+
+export class VideoNotReadyException extends DomainException {
+  constructor() {
+    super('VIDEO_NOT_READY', 409, 'Video is not ready for playback');
+  }
+}
+
+export class UploadLimitReachedException extends DomainException {
+  constructor(public readonly limit: number) {
+    super(
+      'UPLOAD_LIMIT_REACHED',
+      409,
+      'Too many uploads in progress for this channel',
+    );
+  }
+}
+
+export class UnsupportedMediaTypeException extends DomainException {
+  constructor() {
+    super('UNSUPPORTED_MEDIA_TYPE', 415, 'Unsupported media type');
+  }
+}
+
+export class UploadIncompleteException extends DomainException {
+  constructor(message = 'Uploaded parts do not match the expected upload') {
+    super('UPLOAD_INCOMPLETE', 409, message);
+  }
+}
+
+export class StorageUnavailableException extends DomainException {
+  constructor() {
+    super('STORAGE_UNAVAILABLE', 503, 'Storage service is unavailable');
+  }
+}
