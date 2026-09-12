@@ -37,44 +37,34 @@ How each external system is handled in tests. These strategies were confirmed wi
 
 ---
 
-## Object Storage — Local Filesystem
+## Object Storage — Real (Docker) — MinIO via the S3 API
 
-**Strategy:** Local filesystem storage in development and tests. S3 in production.
+**Strategy:** Real MinIO service in Docker Compose, in both development and tests — no local-filesystem adapter. Updated by Phase 03 (see `docs/decisions/technical-decisions-phase-03-upload-processing.md`, V-03/TD-04/TD-07/TD-11/TD-14/TD-16/TD-21): the phase's storage behaviour (presigned URLs, browser-direct `PUT`, `Range`/`206` responses, `ResponseContentDisposition`) is S3-protocol behaviour that a local-filesystem adapter cannot reproduce. Same posture already used for PostgreSQL, Mailpit and the queue — no mocking needed, exercise the real service.
 
 **Approach:**
-- The storage layer should use an abstraction (e.g., `StorageService` interface) that allows switching between local filesystem and S3
-- In tests, use the local filesystem adapter — no mocking needed
-- Use a temporary directory for test uploads: `os.tmpdir()` or a dedicated `test-uploads/` directory
-- Clean up test files in `afterAll`
+- Tests talk to the MinIO service already running in Compose via the TD-07 S3 client (AWS SDK v3), the same way the application does — no separate test-only storage abstraction.
+- Isolate test runs with a dedicated test bucket (or a per-test-run key prefix) so parallel/repeated runs do not collide; clean up created objects in `afterAll`/`afterEach`.
+- Integration tests exercise the real behaviour: `CreateMultipartUpload`/`UploadPart`/`CompleteMultipartUpload`/`AbortMultipartUpload`, presigned URL generation and consumption, and `Range` requests answered with `206 Partial Content`.
 
 **Setup pattern:**
 ```typescript
-// In test module setup
-{
-  provide: 'STORAGE_CONFIG',
-  useValue: {
-    driver: 'local',
-    basePath: path.join(os.tmpdir(), 'streamtube-test-uploads'),
-  },
-}
+// Reuse the same S3Client configuration as the application,
+// pointed at the Compose MinIO service (never localhost)
+const testBucket = `test-${process.env.JEST_WORKER_ID}-${Date.now()}`;
 ```
 
 **Integration test:**
 ```typescript
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-
 describe('StorageService (integration)', () => {
-  const testDir = path.join(os.tmpdir(), 'streamtube-test-uploads');
+  const testPrefix = `test/${Date.now()}/`;
 
-  afterAll(() => {
-    fs.rmSync(testDir, { recursive: true, force: true });
+  afterAll(async () => {
+    // delete every object created under testPrefix in this run
   });
 
-  it('should upload and retrieve a file', async () => {
+  it('should upload and retrieve a file via the real S3 API', async () => {
     const buffer = Buffer.from('test content');
-    const key = await storageService.upload(buffer, 'test.txt');
+    const key = await storageService.upload(buffer, `${testPrefix}test.txt`);
 
     const retrieved = await storageService.get(key);
     expect(retrieved.toString()).toBe('test content');

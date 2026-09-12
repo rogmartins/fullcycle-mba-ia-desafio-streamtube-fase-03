@@ -1,7 +1,7 @@
 # Technical Decisions — Phase 03: Upload e Processamento de Vídeos
 
 > **Phase:** 03 — Upload e Processamento de Vídeos
-> **Status:** Decided (TD-01–TD-21)
+> **Status:** Decided (TD-01–TD-23)
 > **Date:** 2026-09-06
 
 ---
@@ -678,6 +678,24 @@ A README and a script; nothing runs automatically.
 
 ---
 
+## TD-22: Accepted Upload Formats
+
+**Context:** Raised by `plan-phase` validation (V-01): no document defines which video containers/codecs `POST /videos` accepts. Since TD-17 stores the file as-is (no remux/re-encode) and TD-04 means the API never inspects the bytes at upload time, any container the browser cannot decode natively would be processed, thumbnailed, and marked `ready` — then simply fail to play, with no error path.
+
+**Decision:** **Option A** — Allowlist at `POST /videos` by declared `content_type` + extension: `video/mp4` (`.mp4`, `.m4v`), `video/webm` (`.webm`), `video/quicktime` (`.mov`). Anything else is rejected with `415 UNSUPPORTED_MEDIA_TYPE`. If the worker's `ffprobe` succeeds but finds no video stream, or fails to parse the file, the job fails non-retryably with `error_reason = INVALID_MEDIA` (no retry budget burned, per TD-03). Codec validation inside an accepted container (e.g. ProRes inside `.mov`) is explicitly **not** enforced in Phase 03 — `codec_name` is recorded in stored metadata (N-14) so the question can be reopened against real data, the same posture TD-17 takes for `moov` placement.
+
+---
+
+## TD-23: Video Endpoint Rate Limiting and Upload Concurrency Cap
+
+**Context:** Raised by `plan-phase` validation (V-02). Phase 02's plan (`phase-02-auth.md`, SI-02.13) states the rate limiter is scoped to `AuthController`, but the actual code registers `ThrottlerGuard` as an application-wide `APP_GUARD` in `AuthModule` — the documented scoping does not exist. Under the global limit (10 req/min per IP), a single 10GB upload (~200 presigned-part requests under TD-04) cannot complete: the phase's headline capability would be blocked by inherited configuration, not by anything decided in this document. Separately, no document bounds how many multipart uploads a channel may hold open at once; each reserves storage (TD-20) and a worker job slot (TD-03) until completed or swept.
+
+**Decision:** **Option A** —
+1. Apply `@SkipThrottle()` to `VideosController`, the same precedent already set on `AppController`. Properly scoping `ThrottlerGuard` to only `AuthController` (fixing the Phase 02 plan/code mismatch) is tracked as a separate follow-up task, not bundled into Phase 03.
+2. Cap open uploads per channel at an environment-configurable `UPLOAD_MAX_OPEN_PER_CHANNEL`, **initial value 5** — `POST /videos` returns `409 UPLOAD_LIMIT_REACHED` when a channel already has 5 videos in `uploading` status. The value is deliberately adjustable without a code change if it proves too strict or too loose in practice.
+
+---
+
 ## Decisions Summary
 
 | ID | Decision | Recommendation | Choice |
@@ -703,6 +721,8 @@ A README and a script; nothing runs automatically.
 | TD-19 | Object Key Convention | A — `videos/{videoId}/…` keyed by the internal id | **Option A** |
 | TD-20 | Abandoned Multipart Upload Expiry Policy | C — Sweep as primary + lifecycle rule as backstop | **Option C** |
 | TD-21 | Bucket, Policy and Lifecycle Provisioning | A — `minio/mc` init service in Compose | **Option A** |
+| TD-22 | Accepted Upload Formats | A — Allowlist mp4/webm/mov; non-retryable failure on no video stream | **Option A** |
+| TD-23 | Video Endpoint Rate Limiting and Upload Concurrency Cap | A — `@SkipThrottle()` + cap of 5 open uploads/channel | **Option A** |
 
 ---
 
