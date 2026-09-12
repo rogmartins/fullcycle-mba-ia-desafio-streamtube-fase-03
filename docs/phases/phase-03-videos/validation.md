@@ -1,10 +1,63 @@
 # Phase 03 — Upload e Processamento de Vídeos — Validation
 
-> Run on 2026-09-12 against the sources listed in [context.md](context.md). Findings are grouped by type. Each **blocking** finding quotes the conflicting or missing statement, describes the consequence for the plan, and proposes a resolution. **Non-blocking** items are assumptions the plan will adopt unless vetoed — they are listed so the resolution round covers everything at once.
+> **Run 3 — 2026-09-12** (final; Run 2 findings resolved — see the verdict). **Run 2 — 2026-09-12** (re-run after the resolution round) against the sources listed in [context.md](context.md), plus the updated [technical-decisions-phase-03-upload-processing.md](../../decisions/technical-decisions-phase-03-upload-processing.md) (now TD-01–TD-23) and `.claude/skills/testing-guide-nestjs-project/references/external-systems.md`. Findings are grouped by type. Each **blocking** finding quotes the conflicting or missing statement, describes the consequence for the plan, and proposes a resolution. **Non-blocking** items are assumptions the plan will adopt unless vetoed.
 
 ---
 
-## Blocking findings
+## Resolution status of Run 1 findings
+
+| Run 1 | Resolution | Verified in Run 2 |
+|-------|------------|-------------------|
+| V-01 — accepted formats | **TD-22** (Option A): allowlist `video/mp4` (`.mp4`, `.m4v`), `video/webm` (`.webm`), `video/quicktime` (`.mov`) → otherwise `415 UNSUPPORTED_MEDIA_TYPE`; no video stream / unparsable → non-retryable `failed(INVALID_MEDIA)`; codec not enforced, `codec_name` recorded | ✅ Consistent with TD-03 (retryable vs non-retryable), TD-17 (store as-is) and N-14 (metadata). |
+| V-02 — global throttler + upload cap | **TD-23** (Option A): `@SkipThrottle()` on `VideosController` (precedent: `AppController`); throttler scoping to `AuthController` is a separate follow-up task; `UPLOAD_MAX_OPEN_PER_CHANNEL=5` → `409 UPLOAD_LIMIT_REACHED` on `POST /videos` | ✅ `@SkipThrottle()` is a class-level decorator of `@nestjs/throttler@6` already used in `src/app.controller.ts`; the cap is one `COUNT` on `videos WHERE channel_id = ? AND status = 'uploading'`. |
+| V-03 — testing guide storage strategy | `references/external-systems.md` section rewritten to *"Object Storage — Real (Docker) — MinIO via the S3 API"*: no local adapter, real MinIO via the TD-07 client, dedicated test bucket / per-run prefix, cleanup in `afterAll`/`afterEach` | ✅ The authoritative reference now matches TD-04/TD-07/TD-11/TD-14/TD-16/TD-21. Residual wording elsewhere in the skill is listed as N-16 (non-blocking). |
+| N-01 … N-15 | Confirmed by the user without vetoes | ✅ Carried into the plan unchanged (see the table further down, kept for reference). |
+
+---
+
+## Run 2 — Blocking findings
+
+### V-04 — Library compatibility: `@nestjs/bullmq@12` is ESM-only and does not load under the project's Jest + ts-jest (CommonJS) setup
+
+**Type:** Dependency gap (toolchain) + inconsistency with the posture stated in TD-13.
+
+**Sources:**
+
+- Decision document, TD-01 Option A: *"`@nestjs/bullmq@12` (peer: `@nestjs/common` `^10 || ^11 || ^12`, `bullmq` `^3–^6`)"*; Infrastructure Impact → Dependencies: *"`@nestjs/bullmq@^12`, `bullmq@^5`/`^6`, `ioredis`"*; context.md §2: *"Exact versions to be confirmed via context7 in `library-refs.md`"*.
+- Decision document, TD-13 rationale (project posture): *"pulling ESM into the CommonJS Jest setup is avoidable friction"* — the reason `nanoid@6` was rejected.
+- npm registry, verified 2026-09-12: `@nestjs/bullmq@12.0.0` (2026-08-27) ships `"type": "module"` and its `exports["."].require` points at the **same ESM file** (`./dist/index.js`) — there is no CommonJS build. `@nestjs/bullmq@11.0.5` (last 11.x) is CommonJS but peers only `bullmq ^3 || ^4 || ^5`. `bullmq@6.3.4` is CommonJS and lists `ioredis` as an **optional peer** (no longer bundled — `bullmq@5.81.5` bundles `ioredis@5.11.1`). `ioredis@6.0.0` is CommonJS, Node ≥ 20.
+- Project toolchain (installed): TypeScript 5.9.3 with `module: nodenext` and no `"type"` in `package.json` (CommonJS output), Jest 30.3.0, ts-jest 29.4.6, both Jest configs using `transform: { "^.+\\.(t|j)s$": "ts-jest" }` with Jest's default `transformIgnorePatterns` (node_modules never transformed).
+
+**Empirical check** (scratch project in the scratchpad, run inside `node:25.6.0-slim`, same tsconfig `module`/`target`/decorator flags as `nestjs-project`; a spec importing `BullModule`, `Processor`, `WorkerHost` from `@nestjs/bullmq` and `UnrecoverableError` from `bullmq`):
+
+| Setup | `tsc --noEmit` | `node -e require('@nestjs/bullmq')` | `jest` (ts-jest, project config) |
+|-------|----------------|--------------------------------------|----------------------------------|
+| `@nestjs/bullmq@12.0.0` + `bullmq@6.3.4` + `ioredis@6.0.0` | ✅ exit 0 (TS 5.9 accepts `require(esm)` under `nodenext`) | ✅ (Node 25 `require(esm)`) | ❌ `SyntaxError: Unexpected token 'export'` at `node_modules/@nestjs/bullmq/dist/index.js:1` — every spec/e2e file that imports (directly or transitively via `AppModule`) anything from `@nestjs/bullmq` fails to load |
+| same + Jest workaround: `transformIgnorePatterns: ["/node_modules/(?!(@nestjs/bullmq|@nestjs/bull-shared)/)"]` and a Jest-only tsconfig with `allowJs: true`, `module: commonjs`, `moduleResolution: node` — applied to **both** `package.json#jest` and `test/jest-e2e.json` | ✅ | ✅ | ✅ |
+| `@nestjs/bullmq@11.0.5` + `bullmq@5.81.5` (CommonJS, `ioredis` bundled — no explicit install) | ✅ | ✅ | ✅ with **no** toolchain change |
+
+**Consequence:** with the versions as written in the decision document, the plan's Tests sections cannot pass as-is — `videos.module.spec.ts`, every `*.integration-spec.ts` that imports the queue module, the processor tests and all E2E suites (they import `AppModule`, which will import the queue module) crash at module load. This is a toolchain fact, not a design flaw in TD-01 (BullMQ + Redis via `@nestjs/bullmq` is unaffected as a technology choice); it only decides **which major versions** the plan pins and whether an infrastructure SI must also change both Jest configs.
+
+**Decision needed** (one of):
+
+1. **Pin `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5`, no explicit `ioredis`** — zero toolchain change; consistent with the TD-13 posture ("avoid ESM in the CommonJS Jest setup"); `WorkerHost`, `@Processor`, `upsertJobScheduler` (job schedulers, needed for the TD-06/TD-20 sweep), `UnrecoverableError` and custom `jobId` all exist in these versions (confirmed via context7). Cost: not on the latest majors; `@nestjs/bullmq@11` is the line that pairs with NestJS 11, upgrade to 12/6 happens together with a future NestJS 12 / ESM migration. **Recommendation.**
+2. **Keep `@nestjs/bullmq@^12.0.0` + `bullmq@^6.3.4` + `ioredis@^6.0.0`** and add the Jest workaround above as part of the queue infrastructure SI (both Jest configs + a `tsconfig.jest.json`). Cost: the project's test runner starts transpiling `node_modules` packages, a second tsconfig diverges from `nodenext`, and the same friction TD-13 chose to avoid is accepted here.
+
+Whichever is chosen, the decision document's Dependencies row (*"`@nestjs/bullmq@^12`, `bullmq@^5`/`^6`, `ioredis`"*) should be updated to the pinned majors so `library-refs.md` and the document agree.
+
+---
+
+## Run 2 — Non-blocking (new)
+
+| # | Topic | Assumption the plan will adopt |
+|---|-------|--------------------------------|
+| N-16 | Residual "local adapter / local filesystem" wording in the testing-guide skill outside the updated reference (`SKILL.md` §2 *"local storage uploads"*, §3 *"…or local adapter"*; `artifacts/services.md` line 23 *"local filesystem for storage"* and line 168 *"storage uploads (local adapter)"*) | `references/external-systems.md` is authoritative (it is the file the V-03 resolution updated and the one the checklist rows point to). The plan writes storage tests against real MinIO. The four residual phrases become a separate docs task alongside the N-15 follow-ups. |
+| N-17 | BullMQ custom `jobId` semantics (context7, *Job Ids* / *Throttle jobs*): a job id already present in the queue — including in the `completed`/`failed` sets — makes a new `add()` a silent no-op; ids must not contain `:` and must not be all digits | Processing jobs use `jobId = 'video-' + video.id` with `removeOnComplete: true` and `removeOnFail: true`, so N-06's re-enqueue paths (sweep) are idempotent while the job is queued/active and possible again once it has finished. The `videos` row (`status`, `error_reason`, `attempts`) is the durable record of outcomes, per TD-03 — Redis job history is not relied on. |
+| N-18 | Stale header note in the decision document's Infrastructure Impact table (*"Reflects the decided TD-01 – TD-17 plus the recommended TD-18 – TD-21"*) while TD-18–TD-23 are decided | Treated as decided; cosmetic docs fix, bundled with the Dependencies-row update requested in V-04. |
+
+---
+
+## Run 1 — Blocking findings (resolved — kept for traceability)
 
 ### V-01 — Missing decision: accepted video formats / containers
 
@@ -61,9 +114,9 @@
 
 ---
 
-## Non-blocking — assumptions the plan will adopt unless vetoed
+## Run 1 — Non-blocking assumptions (all confirmed by the user, no vetoes)
 
-These are either explicitly delegated to plan-phase by the decision document or are plan-level design consequences with one defensible answer. Say "veto N-xx: …" in the resolution round to change any of them.
+These are either explicitly delegated to plan-phase by the decision document or are plan-level design consequences with one defensible answer. Confirmed in the resolution round; the plan adopts them as written.
 
 | # | Topic | Assumption the plan will adopt |
 |---|-------|--------------------------------|
@@ -85,19 +138,33 @@ These are either explicitly delegated to plan-phase by the decision document or 
 
 ---
 
-## Checks that passed
+## Checks that passed (Run 1, re-verified in Run 2)
 
 - **Decision-vs-decision consistency:** TD-01…TD-21 form a coherent chain (each "Depends on" is satisfied by an earlier decided option); no chosen option contradicts another (e.g. TD-11 B and TD-17 A are mutually consistent about never reading the whole object; TD-14 B reuses TD-04 A's CORS surface).
 - **Previous-phase constraints:** no Phase 03 decision reopens a Phase 01/02 choice — `registerAs` + Joi (01.01–01.04), custom guards (02.02), class-validator (02.06), domain exception filter (02.07), nickname ownership in `ChannelsModule` (02.10) are all respected. The Phase 02 error response format is inherited unchanged.
 - **Capability coverage:** every capability C1–C9 in [context.md](context.md) §1 maps to at least one decided TD; the only capability-level gap is the format policy (V-01).
 - **Dependency on delivered work:** everything Phase 03 needs from Phase 02 exists in the tree — `JwtAuthGuard` + `@Public()` + `@CurrentUser()`, `Channel` entity and `ChannelsModule`, `DomainException` base, config namespaces, migration/seed/test infrastructure. Only `ChannelsService.findByUserId` is missing and is added in-phase (N-08).
-- **Library compatibility (from the decision document, to be re-confirmed via context7 in `library-refs.md`):** `@nestjs/bullmq@12` peers `@nestjs/common ^10 || ^11 || ^12` and `bullmq ^3–^6`; AWS SDK v3 requires Node ≥ 20; no ESM-only package on the critical path (TD-13 explicitly avoided `nanoid@6`).
+- **Library compatibility (re-confirmed via context7 + npm registry in Run 2):** `@aws-sdk/client-s3@3.1131.0` and `@aws-sdk/s3-request-presigner@3.1131.0` are CommonJS (`dist-cjs`), Node ≥ 20, no peers — `S3Client({ endpoint, forcePathStyle: true })`, `getSignedUrl(client, command, { expiresIn })`, `GetObjectCommand.ResponseContentDisposition`, `ListMultipartUploadsCommand` `KeyMarker`/`UploadIdMarker` pagination all verified. `@nestjs/bullmq` peer ranges are as the decision document states; **but** the `@nestjs/bullmq@12` line is ESM-only — see V-04.
 - **REST conventions:** every planned endpoint has a conventional status code (201 create, 200 data, 204 actions/deletes) and the `{ statusCode, error, message }` error shape.
 - **Docker networking rule:** all service hosts are Compose names; the single exception (browser-facing storage endpoint) is documented by the decision document itself and handled in N-09.
 
 ---
 
 ## Verdict
+
+**Run 3: `clean`** — V-04 resolved as **TD-24** (Option A: `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5`, CommonJS line, `ioredis` bundled), recorded in the decision document together with the updated Dependencies row (N-18 fixed in the same edit). N-16 and N-17 adopted without veto. The APIs the plan references were re-checked against the pinned typings (`BullModule`, `@Processor`, `WorkerHost`, `@OnWorkerEvent`, `@InjectQueue`, `Queue.upsertJobScheduler`, `UnrecoverableError`, `removeOnComplete`/`removeOnFail`, worker `concurrency`/`lockDuration`/`maxStalledCount`). Plan artefacts generated: [library-refs.md](library-refs.md), [phase-03-videos.md](phase-03-videos.md), [progress.md](progress.md).
+
+---
+
+## Run 2 verdict (superseded)
+
+**Run 2: `dirty`** — V-01, V-02 and V-03 are resolved (TD-22, TD-23, updated testing guide) and N-01–N-15 are confirmed, but one new blocking finding surfaced while re-confirming library versions: **V-04** — `@nestjs/bullmq@12` is ESM-only and breaks the project's Jest + ts-jest setup (reproduced inside `node:25.6.0-slim`). No plan artefacts (`library-refs.md`, `phase-03-videos.md`, `progress.md`) were generated.
+
+**To unblock:** choose V-04 option 1 (recommended: `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5`) or option 2 (`@nestjs/bullmq@^12` + `bullmq@^6` + `ioredis@^6` + Jest transform workaround), update the Dependencies row of `docs/decisions/technical-decisions-phase-03-upload-processing.md` accordingly, and veto N-16–N-18 if needed. Validation is then re-run against the updated document before the plan is drafted.
+
+---
+
+## Run 1 verdict (superseded)
 
 **`dirty`** — three blocking findings (V-01 accepted formats, V-02 global throttler + upload cap, V-03 testing-guide storage strategy). No plan artefacts (`library-refs.md`, `phase-03-videos.md`, `progress.md`) were generated.
 

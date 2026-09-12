@@ -43,7 +43,7 @@ Capabilities, verbatim:
 
 ---
 
-## 2. Technical decisions — TD-01 to TD-21 (all decided)
+## 2. Technical decisions — TD-01 to TD-24 (all decided; TD-22–TD-24 added during validation — see [validation.md](validation.md))
 
 | ID | Decision | Choice | Practical consequence for the plan |
 |----|----------|--------|------------------------------------|
@@ -68,6 +68,9 @@ Capabilities, verbatim:
 | TD-19 | Object keys | **A** — `videos/{videoId}/source.<ext>` and `videos/{videoId}/thumbnail.jpg`, keyed by internal UUID | Keep original extension; nothing mutable in the key |
 | TD-20 | Abandoned multipart expiry | **C** — Sweep as primary + lifecycle rule as backstop | Sweep also aborts; `AbortIncompleteMultipartUpload` lifecycle JSON where honoured (no-op on MinIO); `MINIO_API_STALE_UPLOADS_EXPIRY` raised above the sweep threshold. **Exact values and ordering delegated to plan-phase** |
 | TD-21 | Provisioning | **A** — One-shot `minio/mc` init service in Compose | `mc mb --ignore-existing`, `mc anonymous set download`, `mc cors set`, lifecycle JSON; no admin credentials in API/worker |
+| TD-22 | Accepted upload formats | **A** — Allowlist `video/mp4` (`.mp4`, `.m4v`), `video/webm` (`.webm`), `video/quicktime` (`.mov`) | `415 UNSUPPORTED_MEDIA_TYPE` on mismatch; no video stream / unparsable → non-retryable `failed(INVALID_MEDIA)`; codec recorded, not enforced |
+| TD-23 | Video endpoint rate limiting + upload cap | **A** — `@SkipThrottle()` on `VideosController`; `UPLOAD_MAX_OPEN_PER_CHANNEL=5` | `409 UPLOAD_LIMIT_REACHED` on `POST /videos`; throttler scoping to `AuthController` is a separate follow-up task |
+| TD-24 | Queue library version pinning | **A** — `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5` (CommonJS) | No Jest/tsconfig changes; `ioredis` bundled; v12/v6 (ESM-only) deferred to a future NestJS 12 / ESM migration |
 
 ### Choices the decision document explicitly delegates to plan-phase
 
@@ -86,7 +89,7 @@ Capabilities, verbatim:
 
 ### Dependencies the decisions add
 
-`@nestjs/bullmq@^12`, `bullmq@^6`, `ioredis`, `@aws-sdk/client-s3@^3`, `@aws-sdk/s3-request-presigner@^3`. No FFmpeg npm wrapper (TD-10), no id library (TD-13). Exact versions to be confirmed via context7 in `library-refs.md`.
+`@nestjs/bullmq@^11.0.5`, `bullmq@^5.81.5` (CommonJS line — TD-24, decided after validation V-04; `ioredis` bundled), `@aws-sdk/client-s3@^3`, `@aws-sdk/s3-request-presigner@^3`. No FFmpeg npm wrapper (TD-10), no id library (TD-13). Exact versions confirmed via context7 in [library-refs.md](library-refs.md).
 
 ---
 
@@ -194,6 +197,6 @@ Capabilities, verbatim:
 | `.env.example` | `REDIS_HOST=redis`, `REDIS_PORT`, `STORAGE_ENDPOINT` (internal), `STORAGE_PUBLIC_ENDPOINT` (browser), credentials, `STORAGE_VIDEO_BUCKET`, `STORAGE_THUMBNAIL_BUCKET`, `STORAGE_REGION`, `UPLOAD_PART_SIZE_BYTES`, `UPLOAD_MAX_SIZE_BYTES`, presign TTLs (part / playback / download / worker source), sweep thresholds |
 | `src/config/` | `queue.config.ts`, `storage.config.ts` (+ upload/playback tuning) via `registerAs`; Joi schema extended |
 | Database | `videos` table: status enum, `public_id` (12, unique), `channel_id` FK, `storage_key`, `upload_id`, size/part bookkeeping, duration, metadata, thumbnail key, error reason, timestamps |
-| Dependencies | `@nestjs/bullmq`, `bullmq`, `ioredis`, `@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner` |
+| Dependencies | `@nestjs/bullmq@^11`, `bullmq@^5` (TD-24), `@aws-sdk/client-s3`, `@aws-sdk/s3-request-presigner` |
 | Worker | `src/main.worker.ts` + `WorkerModule`; `nest-cli.json` may need an additional entry/`entryFile` handling; Compose `CMD` health probe |
 | Storage config | Video bucket private + CORS (PUT parts, GET with Range, expose `ETag`, `Content-Range`, `Accept-Ranges`, `Content-Length`); thumbnail bucket anonymous download; lifecycle JSON with `AbortIncompleteMultipartUpload` |

@@ -1,7 +1,7 @@
 # Technical Decisions — Phase 03: Upload e Processamento de Vídeos
 
 > **Phase:** 03 — Upload e Processamento de Vídeos
-> **Status:** Decided (TD-01–TD-23)
+> **Status:** Decided (TD-01–TD-24)
 > **Date:** 2026-09-06
 
 ---
@@ -696,6 +696,26 @@ A README and a script; nothing runs automatically.
 
 ---
 
+## TD-24: Queue Library Version Pinning
+
+**Context:** Raised by `plan-phase` validation (V-04) while confirming versions for `library-refs.md`. `@nestjs/bullmq@12.0.0` (2026-08-27) is published as ESM-only — `"type": "module"` with `exports["."].require` pointing at the same ESM file; there is no CommonJS build. The project compiles to CommonJS (`module: nodenext`, no `"type"` in `package.json`) and runs Jest 30 + ts-jest 29 with the default `transformIgnorePatterns`. Reproduced inside `node:25.6.0-slim` with the project's tsconfig flags: `tsc --noEmit` and runtime `require()` succeed (Node 25 `require(esm)`), but every Jest suite that imports `@nestjs/bullmq` — directly or via `AppModule` — fails at load with `SyntaxError: Unexpected token 'export'`. `@nestjs/bullmq@11.0.5` (last 11.x) is CommonJS and peers `bullmq ^3 || ^4 || ^5` and `@nestjs/common ^10 || ^11`; `bullmq@5.81.5` bundles `ioredis@5.11.1`, whereas `bullmq@6` makes `ioredis` an optional peer. TD-01 (BullMQ + Redis via `@nestjs/bullmq`) is not reopened — only the majors are fixed.
+
+**Options:**
+
+### Option A: `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5` (CommonJS line)
+- **Pros:** Zero toolchain change — verified passing under the project's Jest configs as they are. Same posture TD-13 adopted when rejecting `nanoid@6` (*"pulling ESM into the CommonJS Jest setup is avoidable friction"*). `ioredis` comes bundled, so no explicit dependency. Everything the phase uses exists in these versions: `BullModule.forRootAsync` / `registerQueue`, `@Processor` + `WorkerHost`, `@OnWorkerEvent`, job schedulers (`upsertJobScheduler`), `UnrecoverableError`, custom `jobId`, `attempts` + exponential `backoff`.
+- **Cons:** Not on the latest majors; the upgrade to `@nestjs/bullmq@12` / `bullmq@6` is deferred to a future NestJS 12 / ESM migration.
+
+### Option B: `@nestjs/bullmq@^12.0.0` + `bullmq@^6.3.4` + `ioredis@^6.0.0` with a Jest transform workaround
+- **Pros:** Latest majors; `bullmq@6` pluggable backends available if TD-01 Option B is ever revisited.
+- **Cons:** Requires `transformIgnorePatterns: ["/node_modules/(?!(@nestjs/bullmq|@nestjs/bull-shared)/)"]` plus a Jest-only tsconfig (`allowJs: true`, `module: commonjs`, `moduleResolution: node`) applied to **both** `package.json#jest` and `test/jest-e2e.json` (verified passing with that setup). The test runner starts transpiling `node_modules`, a second tsconfig diverges from `nodenext`, and the ESM friction TD-13 avoided is accepted here.
+
+**Recommendation:** **Option A** — the phase gains nothing from the v12/v6 line that it needs, and Option B pays for it with a permanent divergence between the build and test toolchains.
+
+**Decision:** **Option A**
+
+---
+
 ## Decisions Summary
 
 | ID | Decision | Recommendation | Choice |
@@ -723,6 +743,7 @@ A README and a script; nothing runs automatically.
 | TD-21 | Bucket, Policy and Lifecycle Provisioning | A — `minio/mc` init service in Compose | **Option A** |
 | TD-22 | Accepted Upload Formats | A — Allowlist mp4/webm/mov; non-retryable failure on no video stream | **Option A** |
 | TD-23 | Video Endpoint Rate Limiting and Upload Concurrency Cap | A — `@SkipThrottle()` + cap of 5 open uploads/channel | **Option A** |
+| TD-24 | Queue Library Version Pinning | A — `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5` (CommonJS) | **Option A** |
 
 ---
 
@@ -742,7 +763,7 @@ These constrain TD-04 regardless of which store is chosen, since MinIO implement
 
 ## Infrastructure Impact
 
-Reflects the decided TD-01 – TD-17 plus the recommended TD-18 – TD-21 (revise if the pending decisions change).
+Reflects the decided TD-01 – TD-24.
 
 | Item | Change |
 |------|--------|
@@ -752,7 +773,7 @@ Reflects the decided TD-01 – TD-17 plus the recommended TD-18 – TD-21 (revis
 | `src/config/env.validation.ts` | Extend Joi schema with the new variables |
 | Storage service | CORS allowing the frontend origin for browser `PUT`s (TD-04 A); lifecycle rule to abort incomplete multipart uploads |
 | Database | `videos` table with status enum, `storageKey`, `uploadId` (TD-05 A) |
-| Dependencies | `@nestjs/bullmq@^12`, `bullmq@^5`/`^6`, `ioredis`, `@aws-sdk/client-s3@^3`, `@aws-sdk/s3-request-presigner@^3` — **no FFmpeg npm wrapper** (TD-10 A) |
+| Dependencies | `@nestjs/bullmq@^11.0.5`, `bullmq@^5.81.5` (CommonJS line per TD-24; `ioredis` bundled — no explicit install), `@aws-sdk/client-s3@^3`, `@aws-sdk/s3-request-presigner@^3` — **no FFmpeg npm wrapper** (TD-10 A) |
 | Worker Dockerfile | Separate stage/target on `node:25.6.0-slim` with `apt-get install -y ffmpeg` (TD-09 A); entrypoint `main.worker.ts` (TD-08 A) |
 | Worker health check | Compose `CMD`-form probe — the standalone context exposes no HTTP port (TD-08 A) |
 | Database | `public_id` on `videos`: `varchar(12)`, `NOT NULL`, `UNIQUE`, indexed — the lookup key for every public route (TD-13 A) |
@@ -782,6 +803,7 @@ Verified 2026-09-06 against the versions currently published.
 - [pg-boss documentation](https://pgboss.io/) — `12.30.0`
 - [RabbitMQ — Consumers](https://www.rabbitmq.com/docs/consumers) — `consumer_timeout` default 30 min
 - npm registry — peer-dependency ranges for `@nestjs/bullmq@12.0.0`, `@golevelup/nestjs-rabbitmq@9.0.2`, `@nestjs/microservices@11`, `@apricote/nest-pg-boss@2.1.0`
+- npm registry (2026-09-12, TD-24) — `@nestjs/bullmq@12.0.0` `"type": "module"` / `exports` (ESM-only), `@nestjs/bullmq@11.0.5` peers, `bullmq@5.81.5` bundled `ioredis@5.11.1`, `bullmq@6.3.4` optional peers (`ioredis`, `redis`, `pg`); reproduction of the Jest load failure recorded in `docs/phases/phase-03-videos/validation.md` (V-04)
 
 **Round 2 — upload**
 
