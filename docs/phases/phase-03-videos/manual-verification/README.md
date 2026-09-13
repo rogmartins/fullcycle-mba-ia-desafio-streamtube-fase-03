@@ -2,7 +2,7 @@
 
 ## Purpose
 
-`phase-03-videos.progress.md` (SI-03.14 observations) notes that the full HTTP
+`progress.md` (SI-03.14 observations) notes that the full HTTP
 round-trip — real multipart upload from a client, through the API and MinIO,
 processed by the worker, and served back for playback/download — had **not**
 been exercised end-to-end; only unit/integration/e2e suites (which mock or
@@ -11,7 +11,7 @@ verification of that exact gap, using `nestjs-project/scripts/test-upload.js`
 against the environment started with `docker compose up -d`.
 
 This is **not** a replacement for the automated suite documented in
-`phase-03-videos.progress.md` — no assertions here duplicate what that suite
+`progress.md` — no assertions here duplicate what that suite
 already covers.
 
 > **TL;DR:** all upload/processing scenarios that were expected to succeed
@@ -88,7 +88,7 @@ already covers.
    > `docker compose logs video-worker`: bootstrap logs and live
    > `[VideoProcessor] Started processing video ...` / `Completed processing
    > video ...` lines now appear for a real smoke-test upload. Full details
-   > in `phase-03-videos.progress.md` under "Post-phase cleanup — Deviation #2".
+   > in `progress.md` under "Post-phase cleanup — Deviation #2".
    > Fixed by the commit that introduces this note, on
    > `feature/phase-03-videos-implementation` (see `git log --oneline -- nestjs-project/src/main.worker.ts`).
 

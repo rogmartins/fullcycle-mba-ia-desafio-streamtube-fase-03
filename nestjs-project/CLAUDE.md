@@ -122,7 +122,7 @@ Conventions for **how to write** each kind of test (mocking patterns, AAA struct
 
 ## Video Processing
 
-The upload/processing pipeline (Phase 03) spans `videos/`, `processing/`, `queue/`, and `storage/`. Technical decisions (queue technology, worker deployment model, multipart upload strategy, etc.) are recorded in `docs/decisions/technical-decisions-phase-03-upload-processing.md` (TD-01–TD-24) — this section is operational only, not a decision log.
+The upload/processing pipeline (Phase 03) spans `videos/`, `processing/`, `queue/`, and `storage/`. Technical decisions (queue technology, worker deployment model, multipart upload strategy, etc.) are recorded in `docs/decisions/technical-decisions-phase-03-videos.md` (TD-01–TD-24) — this section is operational only, not a decision log.
 
 - **Running the worker:** `docker compose up -d` starts `video-worker` automatically (its Compose command is `npm run start:worker:dev`, i.e. `nest start --watch --entryFile main.worker`). To rebuild/restart it alone: `docker compose up -d --build video-worker`. To run its tests or type-check inside the container, use `docker compose exec nestjs-api ...` as with any other command — the worker container shares the same image and source volume.
 - **New environment variables:** the queue (`REDIS_HOST`, `REDIS_PORT`, `SWEEP_*`), storage (`STORAGE_*`, `UPLOAD_*`), and URL-TTL (`*_URL_TTL_SECONDS`) variables introduced in this phase are declared and commented in `.env.example` and validated in `src/config/env.validation.ts` — check those two files rather than this one for exact names/defaults, since they are the source of truth.

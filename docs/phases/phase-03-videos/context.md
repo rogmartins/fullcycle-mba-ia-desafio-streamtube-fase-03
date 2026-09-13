@@ -1,6 +1,6 @@
 # Phase 03 — Upload e Processamento de Vídeos — Context
 
-> Consolidated context read before planning. Sources: [project-plan.md](../../project-plan.md), [technical-decisions-phase-03-upload-processing.md](../../decisions/technical-decisions-phase-03-upload-processing.md), the Decisions Summary tables of Phases 01 and 02, [phase-01-configuracao-base.md](../phase-01-configuracao-base.md), [phase-02-auth.md](../phase-02-auth.md), [phase-02-auth.progress.md](../phase-02-auth.progress.md), the `testing-guide-nestjs-project` skill, and the current `nestjs-project/` source tree.
+> Consolidated context read before planning. Sources: [project-plan.md](../../project-plan.md), [technical-decisions-phase-03-videos.md](../../decisions/technical-decisions-phase-03-videos.md), the Decisions Summary tables of Phases 01 and 02, [phase-01-configuracao-base.md](../phase-01-configuracao-base.md), [phase-02-auth.md](../phase-02-auth.md), [phase-02-auth.progress.md](../phase-02-auth.progress.md), the `testing-guide-nestjs-project` skill, and the current `nestjs-project/` source tree.
 >
 > Date: 2026-09-12
 

@@ -3,7 +3,7 @@
  * Manual end-to-end smoke test for Phase 03 (Streamtube upload/processing).
  *
  * Exercises the real HTTP flow that has NOT been covered by automated tests yet
- * (see phase-03-videos.progress.md, SI-03.14 observations):
+ * (see progress.md, SI-03.14 observations):
  *   register -> confirm email (via Mailpit) -> login -> POST /videos
  *   -> sign each part -> PUT each part to MinIO -> complete upload
  *   -> poll GET /videos/:publicId until the worker finishes (ready/failed)

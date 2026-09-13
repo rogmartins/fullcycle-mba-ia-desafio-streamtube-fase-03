@@ -4,7 +4,7 @@
 
 Deliver the video ingestion pipeline — resumable multipart upload of files up to 10 GB directly to the object store, automatic draft pre-registration, background processing (metadata extraction and thumbnail generation) by a dedicated FFmpeg worker, a unique public identifier per video, and presigned streaming/download URLs — establishing the storage, queue and worker infrastructure for all subsequent phases.
 
-> Inputs: [context.md](context.md), [validation.md](validation.md) (verdict `clean`, Run 3), [library-refs.md](library-refs.md), and [technical-decisions-phase-03-upload-processing.md](../../decisions/technical-decisions-phase-03-upload-processing.md) (TD-01–TD-24). Assumptions N-01–N-17 from validation.md are applied as written. Target subproject: `nestjs-project` only.
+> Inputs: [context.md](context.md), [validation.md](validation.md) (verdict `clean`, Run 3), [library-refs.md](library-refs.md), and [technical-decisions-phase-03-videos.md](../../decisions/technical-decisions-phase-03-videos.md) (TD-01–TD-24). Assumptions N-01–N-17 from validation.md are applied as written. Target subproject: `nestjs-project` only.
 
 ---
 

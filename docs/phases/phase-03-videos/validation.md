@@ -1,6 +1,6 @@
 # Phase 03 — Upload e Processamento de Vídeos — Validation
 
-> **Run 3 — 2026-09-12** (final; Run 2 findings resolved — see the verdict). **Run 2 — 2026-09-12** (re-run after the resolution round) against the sources listed in [context.md](context.md), plus the updated [technical-decisions-phase-03-upload-processing.md](../../decisions/technical-decisions-phase-03-upload-processing.md) (now TD-01–TD-23) and `.claude/skills/testing-guide-nestjs-project/references/external-systems.md`. Findings are grouped by type. Each **blocking** finding quotes the conflicting or missing statement, describes the consequence for the plan, and proposes a resolution. **Non-blocking** items are assumptions the plan will adopt unless vetoed.
+> **Run 3 — 2026-09-12** (final; Run 2 findings resolved — see the verdict). **Run 2 — 2026-09-12** (re-run after the resolution round) against the sources listed in [context.md](context.md), plus the updated [technical-decisions-phase-03-videos.md](../../decisions/technical-decisions-phase-03-videos.md) (now TD-01–TD-23) and `.claude/skills/testing-guide-nestjs-project/references/external-systems.md`. Findings are grouped by type. Each **blocking** finding quotes the conflicting or missing statement, describes the consequence for the plan, and proposes a resolution. **Non-blocking** items are assumptions the plan will adopt unless vetoed.
 
 ---
 
@@ -160,7 +160,7 @@ These are either explicitly delegated to plan-phase by the decision document or 
 
 **Run 2: `dirty`** — V-01, V-02 and V-03 are resolved (TD-22, TD-23, updated testing guide) and N-01–N-15 are confirmed, but one new blocking finding surfaced while re-confirming library versions: **V-04** — `@nestjs/bullmq@12` is ESM-only and breaks the project's Jest + ts-jest setup (reproduced inside `node:25.6.0-slim`). No plan artefacts (`library-refs.md`, `phase-03-videos.md`, `progress.md`) were generated.
 
-**To unblock:** choose V-04 option 1 (recommended: `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5`) or option 2 (`@nestjs/bullmq@^12` + `bullmq@^6` + `ioredis@^6` + Jest transform workaround), update the Dependencies row of `docs/decisions/technical-decisions-phase-03-upload-processing.md` accordingly, and veto N-16–N-18 if needed. Validation is then re-run against the updated document before the plan is drafted.
+**To unblock:** choose V-04 option 1 (recommended: `@nestjs/bullmq@^11.0.5` + `bullmq@^5.81.5`) or option 2 (`@nestjs/bullmq@^12` + `bullmq@^6` + `ioredis@^6` + Jest transform workaround), update the Dependencies row of `docs/decisions/technical-decisions-phase-03-videos.md` accordingly, and veto N-16–N-18 if needed. Validation is then re-run against the updated document before the plan is drafted.
 
 ---
 
@@ -168,4 +168,4 @@ These are either explicitly delegated to plan-phase by the decision document or 
 
 **`dirty`** — three blocking findings (V-01 accepted formats, V-02 global throttler + upload cap, V-03 testing-guide storage strategy). No plan artefacts (`library-refs.md`, `phase-03-videos.md`, `progress.md`) were generated.
 
-**To unblock:** answer V-01 (1–3), V-02 (1–2) and V-03, and veto any N-xx you disagree with. Record V-01 and V-02.2 in `docs/decisions/technical-decisions-phase-03-upload-processing.md` (e.g. as TD-22 *Accepted upload formats* and TD-23 *Video endpoint rate limiting and upload cap*), and V-03 in the testing guide. Validation is then re-run against the updated sources before the plan is drafted.
+**To unblock:** answer V-01 (1–3), V-02 (1–2) and V-03, and veto any N-xx you disagree with. Record V-01 and V-02.2 in `docs/decisions/technical-decisions-phase-03-videos.md` (e.g. as TD-22 *Accepted upload formats* and TD-23 *Video endpoint rate limiting and upload cap*), and V-03 in the testing guide. Validation is then re-run against the updated sources before the plan is drafted.

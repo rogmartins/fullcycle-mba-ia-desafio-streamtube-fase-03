@@ -39,7 +39,7 @@ How each external system is handled in tests. These strategies were confirmed wi
 
 ## Object Storage — Real (Docker) — MinIO via the S3 API
 
-**Strategy:** Real MinIO service in Docker Compose, in both development and tests — no local-filesystem adapter. Updated by Phase 03 (see `docs/decisions/technical-decisions-phase-03-upload-processing.md`, V-03/TD-04/TD-07/TD-11/TD-14/TD-16/TD-21): the phase's storage behaviour (presigned URLs, browser-direct `PUT`, `Range`/`206` responses, `ResponseContentDisposition`) is S3-protocol behaviour that a local-filesystem adapter cannot reproduce. Same posture already used for PostgreSQL, Mailpit and the queue — no mocking needed, exercise the real service.
+**Strategy:** Real MinIO service in Docker Compose, in both development and tests — no local-filesystem adapter. Updated by Phase 03 (see `docs/decisions/technical-decisions-phase-03-videos.md`, V-03/TD-04/TD-07/TD-11/TD-14/TD-16/TD-21): the phase's storage behaviour (presigned URLs, browser-direct `PUT`, `Range`/`206` responses, `ResponseContentDisposition`) is S3-protocol behaviour that a local-filesystem adapter cannot reproduce. Same posture already used for PostgreSQL, Mailpit and the queue — no mocking needed, exercise the real service.
 
 **Approach:**
 - Tests talk to the MinIO service already running in Compose via the TD-07 S3 client (AWS SDK v3), the same way the application does — no separate test-only storage abstraction.
