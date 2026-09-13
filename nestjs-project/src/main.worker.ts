@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { Logger } from '@nestjs/common';
+import { ConsoleLogger, Logger } from '@nestjs/common';
 import { WorkerModule } from './worker.module';
 import {
   VIDEO_MAINTENANCE_QUEUE,
@@ -10,6 +10,7 @@ async function bootstrap() {
   const app = await NestFactory.createApplicationContext(WorkerModule, {
     bufferLogs: true,
   });
+  app.useLogger(new ConsoleLogger());
   app.enableShutdownHooks();
 
   const logger = new Logger('Worker');

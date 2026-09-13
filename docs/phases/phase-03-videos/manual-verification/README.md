@@ -81,6 +81,17 @@ already covers.
    future task) and all evidence below is sourced from the API
    (`GET /videos/:publicId`) and the database instead of worker logs.
 
+   > **Resolution (2026-09-13):** fixed by adding `app.useLogger(new ConsoleLogger())`
+   > right after `NestFactory.createApplicationContext(...)` in
+   > `src/main.worker.ts`, flushing the buffer as Nest's contract requires.
+   > Verified via `docker compose up -d --build video-worker` +
+   > `docker compose logs video-worker`: bootstrap logs and live
+   > `[VideoProcessor] Started processing video ...` / `Completed processing
+   > video ...` lines now appear for a real smoke-test upload. Full details
+   > in `phase-03-videos.progress.md` under "Post-phase cleanup — Deviation #2".
+   > Fixed by the commit that introduces this note, on
+   > `feature/phase-03-videos-implementation` (see `git log --oneline -- nestjs-project/src/main.worker.ts`).
+
 3. **`test-upload.js` etag bug (pre-existing, fixed in an earlier session).**
    Not a new finding for this document, but worth noting: the script
    originally stripped quotes from the `ETag` response header before
