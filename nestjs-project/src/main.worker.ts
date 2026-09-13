@@ -17,4 +17,4 @@ async function bootstrap() {
     `Video worker started — consuming queues: ${VIDEO_PROCESSING_QUEUE}, ${VIDEO_MAINTENANCE_QUEUE}`,
   );
 }
-bootstrap();
+void bootstrap();
