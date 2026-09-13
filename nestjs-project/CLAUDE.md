@@ -33,7 +33,12 @@ docker compose exec nestjs-api npm run start:dev
 
 Services:
 - `nestjs-api` — NestJS API, port `3000`
-- `db` — PostgreSQL 17, port `5432`, database `streamtube`, user/password `streamtube`
+- `db` — PostgreSQL 17, port `5432` (remapped to `5433` on the host via `compose.override.yaml`), database `streamtube`, user/password `streamtube`
+- `redis` — Redis 7, no published host port (internal `redis:6379` only) — BullMQ queue backend for video processing jobs
+- `minio` — S3-compatible object storage, ports `9000` (S3 API) / `9001` (web console) — stores uploaded video sources and generated thumbnails
+- `minio-init` — one-shot init container (`quay.io/minio/mc`) that provisions MinIO buckets/policies on startup, then exits; not a long-running service
+- `mailpit` — SMTP test server, ports `1025` (SMTP) / `8025` (web UI) — captures account confirmation and password recovery emails
+- `video-worker` — consumes BullMQ jobs from `redis`, runs FFmpeg processing and updates DB/storage; no published port, health-checked via a heartbeat file (`WorkerHeartbeatService`)
 
 All verification and teardown commands run on the **host machine**:
 
@@ -114,6 +119,17 @@ Choose the suffix by what the test really does, not by where the code under test
 A test that constructs a `TypeOrmModule.forRoot`, opens a connection, or hits the `db` service **must** be `*.integration-spec.ts`, never `*.spec.ts`. A test that boots the full Nest application and makes HTTP calls **must** be `*.e2e-spec.ts`.
 
 Conventions for **how to write** each kind of test (mocking patterns, AAA structure, override strategies for global guards, etc.) live in `.claude/rules/nestjs-testing.md` and load when you edit a test file.
+
+## Video Processing
+
+The upload/processing pipeline (Phase 03) spans `videos/`, `processing/`, `queue/`, and `storage/`. Technical decisions (queue technology, worker deployment model, multipart upload strategy, etc.) are recorded in `docs/decisions/technical-decisions-phase-03-upload-processing.md` (TD-01–TD-24) — this section is operational only, not a decision log.
+
+- **Running the worker:** `docker compose up -d` starts `video-worker` automatically (its Compose command is `npm run start:worker:dev`, i.e. `nest start --watch --entryFile main.worker`). To rebuild/restart it alone: `docker compose up -d --build video-worker`. To run its tests or type-check inside the container, use `docker compose exec nestjs-api ...` as with any other command — the worker container shares the same image and source volume.
+- **New environment variables:** the queue (`REDIS_HOST`, `REDIS_PORT`, `SWEEP_*`), storage (`STORAGE_*`, `UPLOAD_*`), and URL-TTL (`*_URL_TTL_SECONDS`) variables introduced in this phase are declared and commented in `.env.example` and validated in `src/config/env.validation.ts` — check those two files rather than this one for exact names/defaults, since they are the source of truth.
+- **Real-service integration tests:** per the Test Type Selection table above, `storage.service.integration-spec.ts`, `video-queue.service.integration-spec.ts`, `ffmpeg.service.integration-spec.ts`, `video.processor.integration-spec.ts`, and `upload-sweep.service.integration-spec.ts` all exercise real MinIO, real Redis, and the real `ffmpeg`/`ffprobe` binaries inside the container — nothing here is mocked.
+- **Video fixtures:** `src/test/video-fixture.ts` (`getVideoFixtures()`) generates small synthetic `.mp4` files with `ffmpeg` on demand into the OS temp directory the first time a test suite needs them — they are never committed to the repo, so there is no dedicated `.gitignore` entry for them.
+- **Manual verification script:** `scripts/test-upload.js` drives the real HTTP upload flow end to end (register → confirm via Mailpit → login → multipart upload → poll until the worker finishes) against a running `docker compose` stack. It is a manual smoke-test tool, not part of the automated suite — run it directly with `node scripts/test-upload.js /path/to/video.mp4` from the host.
+- **Large fixture generator:** `scripts/generate-big-video.sh [target_size_gb] [output_path]` builds a large, valid MP4 for manual multipart-upload testing by encoding a short seed chunk once and concatenating it via stream copy (no re-encoding), then verifies the result with `ffprobe`. Also a manual tool, not part of the automated suite — used to generate the ~10 GiB fixtures documented in `docs/phases/phase-03-videos/manual-verification/README.md`.
 
 ## Jest Configuration
 
