@@ -16,12 +16,6 @@ Este é um projeto greenfield desenvolvido para demonstrar como construir uma ap
 
 ---
 
-## Quadro Branco
-
-- [Quadro Branco](./whiteboard.png)
-
----
-
 ## 📋 Pré-requisitos
 
 - Docker
@@ -87,7 +81,6 @@ green-field-ia-project/
 │   ├── compose.yaml                     # Docker Compose (API + PostgreSQL)
 │   └── Dockerfile.dev                   # Dockerfile de desenvolvimento
 ├── CLAUDE.md                            # Instruções para IA
-├── whiteboard.png                       # Quadro branco do projeto
 └── README.md
 ```
 
