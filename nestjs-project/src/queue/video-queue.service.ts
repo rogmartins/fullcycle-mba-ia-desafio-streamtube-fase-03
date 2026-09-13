@@ -46,4 +46,17 @@ export class VideoQueueService implements OnModuleInit {
     const state = await job.getState();
     return (ACTIVE_JOB_STATES as readonly string[]).includes(state);
   }
+
+  // Used on cancellation: a waiting/delayed job for a deleted video is removed so it
+  // never runs; an active job is left alone to finish and fail on the missing row.
+  async removeIfWaitingOrDelayed(videoId: string): Promise<void> {
+    const job = await this.queue.getJob(processingJobId(videoId));
+    if (!job) {
+      return;
+    }
+    const state = await job.getState();
+    if (state === 'waiting' || state === 'delayed') {
+      await job.remove();
+    }
+  }
 }
