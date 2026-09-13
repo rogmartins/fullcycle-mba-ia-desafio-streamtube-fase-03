@@ -14,9 +14,15 @@ This is **not** a replacement for the automated suite documented in
 `phase-03-videos.progress.md` — no assertions here duplicate what that suite
 already covers.
 
+> **TL;DR:** all upload/processing scenarios that were expected to succeed
+> did succeed, including a full **~10 GiB / 205-part upload that reached
+> `status: ready`** (§5). The only `failed` outcome (§4) was a deliberately
+> corrupted fixture (truncated to fit the size cap) — not an application
+> defect; see Deviation #1.
+
 ## Run metadata
 
-- **Date:** 2026-09-13, ~17:59–18:40 UTC (14:59–15:40 America/Sao_Paulo), across two back-to-back passes — the initial run (tests #1–#3, #4, #5) ending ~18:15 UTC, and test #4b (the intact-file 205-part counterpart, added after review of the #4 result) run separately from ~18:37 UTC
+- **Date:** 2026-09-13, ~17:59–18:40 UTC (14:59–15:40 America/Sao_Paulo), across two back-to-back passes — the initial run (tests #1–#4, #6) ending ~18:15 UTC, and test #5 (the intact-file 205-part counterpart, added after review of the #4 result) run separately from ~18:37 UTC
 - **Command:** `node scripts/test-upload.js <file>` from `nestjs-project/`
 - **Environment:** `docker compose up -d` (db, redis, mailpit, minio, nestjs-api, video-worker), all healthy
 - **Files tested** (names/sizes only — full local paths omitted):
@@ -27,7 +33,7 @@ already covers.
   | `big-test.mp4` | 210.3 MiB | video/mp4 |
   | `big-test-10gb.mp4` (original) | 10 283.6 MiB (~10.045 GiB) | video/mp4 |
   | `big-test-10gb-trimmed.mp4` (derived, see below) | 10 239.0 MiB (exactly `UPLOAD_MAX_SIZE_BYTES - 1 MiB`) | video/mp4 |
-  | `big-test-10gb-valid.mp4` (derived, see §4b) | 10 232.0 MiB (~9.993 GiB) | video/mp4 |
+  | `big-test-10gb-valid.mp4` (derived, see §5) | 10 232.0 MiB (~9.993 GiB) | video/mp4 |
 
 ## Summary of results
 
@@ -178,7 +184,7 @@ report):
 - **Processing outcome:** the worker picked up the job, retried 3 times (per `QUEUE_JOB_ATTEMPTS`), and set `status=failed` / `error_reason=PROCESSING_FAILED` roughly 1 min 36 s after the upload completed. This is the **expected** consequence of truncating the file for the size-limit workaround (see Deviation #1) — the trailing structure of the container (or, depending on how the fixture was originally muxed, the `moov` atom) was cut, so `ffprobe`/`ffmpeg` could not process it. **This is not evidence of a defect in the upload/multipart/queue path** — the transport of all 205 parts, `CompleteMultipartUpload`, the `processing` status flip, and 3 queue attempts with backoff all behaved exactly as documented; only the media payload itself was invalid by construction.
 - **Worker log:** not available (Deviation #2).
 
-### 4b. `big-test-10gb-valid.mp4` (10 232.0 MiB, 205 parts) — success counterpart
+### 5. `big-test-10gb-valid.mp4` (10 232.0 MiB, 205 parts) — success counterpart
 
 Since truncating the file for test #4 deliberately corrupted it, a second
 ~10 GiB fixture was generated to confirm the 205-part path also succeeds
@@ -215,7 +221,7 @@ before it was uploaded.
 - **MinIO evidence:** `screenshots/minio-videos-10gb-bucket.png` — `videos` bucket → `videos/3b35df5f-2aab-4167-b4c8-9266fa1a3cac/source.mp4`, **10.0 GiB**, confirming the full object landed in the store.
 - **Worker log:** not available (Deviation #2).
 
-### 5. Abandoned-upload sweep (`UploadSweepService`, N-05/N-06, TD-06/TD-20)
+### 6. Abandoned-upload sweep (`UploadSweepService`, N-05/N-06, TD-06/TD-20)
 
 The plan's default sweep timers (`SWEEP_INTERVAL_MINUTES=15`,
 `SWEEP_STALE_UPLOAD_MINUTES=60`, `SWEEP_ABANDON_DAYS=7`) make a real-time
@@ -289,7 +295,7 @@ the intact-file counterpart to that same 205-part path, reaching `ready`.
 Storage-side (MinIO) confirmation is the three screenshots in
 `screenshots/`: `minio-videos-bucket.png` and `minio-thumbnails-bucket.png`
 (captured against file #1, `smoke-test.mp4`, before cleanup) and
-`minio-videos-10gb-bucket.png` (captured against file #4b,
+`minio-videos-10gb-bucket.png` (captured against file #5,
 `big-test-10gb-valid.mp4`, showing the 10.0 GiB object in the store before
 cleanup) — see the per-file sections above. All source objects were
 deleted from MinIO during the cleanup pass described below; the buckets
